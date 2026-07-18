@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="SpatialScope is a native macOS application for multiplex spatial image analysis." />
+    <meta property="og:title" content="SpatialScope" />
+    <meta property="og:description" content="A guided workflow for matrix-based multiplex spatial analysis." />
+    <meta property="og:image" content="figures/01-workflow-and-channel-registry.png" />
+    <title>SpatialScope</title>
+    <link rel="icon" href="assets/SpatialScope-icon.png" />
+    <link rel="stylesheet" href="assets/site.css" />
+  </head>
+  <body>
+    <header class="hero">
+      <nav aria-label="Primary navigation">
+        <a class="brand" href="#top">SpatialScope</a>
+        <div class="nav-links">
+          <a href="#workflow">Workflow</a>
+          <a href="#install">Install</a>
+          <a href="https://github.com/fengshuoliu/SpatialScope/blob/main/docs/SpatialScope_User_Manual.md">Manual</a>
+          <a href="https://github.com/fengshuoliu/SpatialScope">GitHub</a>
+        </div>
+      </nav>
+      <div class="hero-content" id="top">
+        <img class="app-icon" src="assets/SpatialScope-icon.png" alt="SpatialScope app icon" />
+        <p class="kicker">Native spatial image analysis for macOS</p>
+        <h1>SpatialScope</h1>
+        <p class="hero-summary">
+          From aligned marker matrices to cell phenotypes, neighborhoods, regions,
+          distance statistics, and editable publication figures.
+        </p>
+        <div class="actions">
+          <a class="button primary" href="https://github.com/fengshuoliu/SpatialScope/releases/latest/download/SpatialScope-macOS-universal.dmg">Download for macOS</a>
+          <a class="button secondary" href="https://github.com/fengshuoliu/SpatialScope/blob/main/docs/SpatialScope_User_Manual.md">Read the manual</a>
+        </div>
+        <p class="requirements">Version 1.0 · macOS 13+ · Apple Silicon and Intel</p>
+      </div>
+    </header>
+
+    <main>
+      <section class="history-band" aria-label="Project history">
+        <div class="constrained history-layout">
+          <strong>Previously TME Spatial</strong>
+          <p>
+            SpatialScope is the renamed, native successor to the published Streamlit prototype.
+            The <a href="https://github.com/fengshuoliu/TME_spatial">legacy repository</a> and
+            <a href="https://fengshuoliu.github.io/TME_spatial/">website</a> remain available for reproducibility and existing article links.
+          </p>
+        </div>
+      </section>
+
+      <section class="section constrained" id="workflow">
+        <div class="section-heading">
+          <p class="kicker dark">Nine connected stages</p>
+          <h2>One analysis workspace</h2>
+          <p>Each stage preserves parameters and writes figures, masks, tables, and metadata into a predictable output structure.</p>
+        </div>
+        <ol class="workflow-grid">
+          <li><span>01</span><strong>Inputs &amp; Calibration</strong><small>Folders, channels, and spatial scale</small></li>
+          <li><span>02</span><strong>Composite Preview</strong><small>Multiplex and split channels</small></li>
+          <li><span>03</span><strong>Nuclei Segmentation</strong><small>Detection and parameter screening</small></li>
+          <li><span>04</span><strong>Cell Type Assignment</strong><small>Rule-based marker phenotypes</small></li>
+          <li><span>05</span><strong>Neighborhood Analysis</strong><small>Local cell composition</small></li>
+          <li><span>06</span><strong>Region Analysis</strong><small>Computational and manual ROIs</small></li>
+          <li><span>07</span><strong>Cell Distribution</strong><small>Boundary bands and density</small></li>
+          <li><span>08</span><strong>Distance Analysis</strong><small>Cell and boundary distances</small></li>
+          <li><span>09</span><strong>Results &amp; Exports</strong><small>Review the generated package</small></li>
+        </ol>
+      </section>
+
+      <section class="media-band">
+        <div class="constrained media-layout">
+          <div>
+            <p class="kicker dark">Inspect the actual outputs</p>
+            <h2>Spatial results stay connected to the image</h2>
+            <p>Region boundaries, distance bands, density summaries, and neighborhood classes remain available as both figures and machine-readable data.</p>
+            <a class="text-link" href="https://github.com/fengshuoliu/SpatialScope/blob/main/docs/SpatialScope_vs_QuPath.md">Compare SpatialScope with QuPath</a>
+          </div>
+          <img src="figures/15-region-boundary-bands.jpg" alt="SpatialScope region boundary band analysis" />
+        </div>
+      </section>
+
+      <section class="section constrained" id="install">
+        <div class="section-heading">
+          <p class="kicker dark">Direct distribution</p>
+          <h2>Install from GitHub</h2>
+        </div>
+        <div class="install-grid">
+          <div><span>1</span><p>Download the current DMG and drag SpatialScope into Applications.</p></div>
+          <div><span>2</span><p>On first launch, approve SpatialScope under System Settings &gt; Privacy &amp; Security.</p></div>
+          <div><span>3</span><p>Use Check for Updates from the SpatialScope menu for later EdDSA-verified releases.</p></div>
+        </div>
+        <div class="actions dark-actions">
+          <a class="button dark-button" href="https://github.com/fengshuoliu/SpatialScope/blob/main/docs/INSTALLATION.md">Installation details</a>
+          <a class="button outline-button" href="https://github.com/fengshuoliu/SpatialScope/releases">All releases</a>
+        </div>
+      </section>
+
+      <section class="citation-band" id="citation">
+        <div class="constrained citation-layout">
+          <p class="kicker">Recommended citation</p>
+          <h2>Research built for reproducibility</h2>
+          <p>
+            Xu Z, Liu F, Ding Y, et al. “Unbiased niche labeling maps immune-excluded niche in bone metastasis.”
+            <em>Cell</em> (2026).
+          </p>
+          <a class="button citation-button" href="https://doi.org/10.1016/j.cell.2026.04.009">View DOI 10.1016/j.cell.2026.04.009</a>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="constrained footer-layout">
+        <span>SpatialScope · MIT License</span>
+        <span>macOS available · Windows and Simplified Chinese planned</span>
+      </div>
+    </footer>
+  </body>
+</html>

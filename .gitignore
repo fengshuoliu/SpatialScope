@@ -1,0 +1,16 @@
+.DS_Store
+.codex/
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xccheckout
+*.xcscmblueprint
+.swiftpm/
+.build/
+__pycache__/
+*.pyc
+.venv/
+release-assets/
+design-qa/
+design-qa.md

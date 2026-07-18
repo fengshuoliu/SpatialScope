@@ -1,0 +1,23 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  macos:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve packages
+        run: xcodebuild -resolvePackageDependencies -project SpatialScope.xcodeproj -scheme SpatialScope
+      - name: Build release configuration
+        run: >-
+          xcodebuild
+          -project SpatialScope.xcodeproj
+          -scheme SpatialScope
+          -configuration Release
+          -destination 'generic/platform=macOS'
+          CODE_SIGNING_ALLOWED=NO
+          build
