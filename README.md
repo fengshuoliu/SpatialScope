@@ -20,13 +20,14 @@ The current release supports macOS 13 or later on Apple Silicon and Intel Macs. 
 
 ## Platform roadmap
 
-| Platform or language | Status | Repository location |
+| Platform | Status | Repository location |
 | --- | --- | --- |
-| macOS, English | Available in version 1.0 | Current Xcode project |
-| Windows, English | Planned | [`windows/`](windows/) |
-| Simplified Chinese | Planned as a shared localization | [`localization/zh-Hans/`](localization/zh-Hans/) |
+| macOS | Available in version 1.1 | Current Xcode project |
+| Windows | Planned | [`windows/`](windows/) |
 
-Windows will use the same `SpatialScope` product identity and release history. Chinese support will be maintained as localization in the canonical repository rather than as a disconnected fork.
+Windows will use the same `SpatialScope` product identity and release history.
+
+The macOS interface follows the system language by default and can be set explicitly to English or Simplified Chinese from the sidebar. This changes UI text only; analysis methods, exported data, filenames, schemas, and the `SpatialScope` product name remain unchanged.
 
 ## Build from source
 

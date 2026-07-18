@@ -771,7 +771,7 @@ struct RegionAnalysisView: View {
     private func manualAdjustmentModeControl(regions: [RegionROI]) -> some View {
         Picker(selection: $manualEditMode) {
             ForEach(RegionManualEditMode.allCases) { mode in
-                Text(mode.rawValue).tag(mode)
+                Text(LocalizedStringKey(mode.rawValue)).tag(mode)
             }
         } label: {
             Text("Adjustment mode")
@@ -819,7 +819,7 @@ struct RegionAnalysisView: View {
     private var manualDrawingModeControl: some View {
         Picker(selection: $manualDrawMode) {
             ForEach(ManualRegionDrawMode.allCases) { mode in
-                Text(mode.rawValue).tag(mode)
+                Text(LocalizedStringKey(mode.rawValue)).tag(mode)
             }
         } label: {
             Text("Drawing mode")
@@ -1375,10 +1375,10 @@ private struct RegionParameterField<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title)
+            Text(LocalizedStringKey(title))
                 .font(.headline)
             content
-            Text(help)
+            Text(LocalizedStringKey(help))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1422,7 +1422,7 @@ private struct RegionRenderPlaceholder: View {
             VStack(spacing: 10) {
                 ProgressView()
                     .controlSize(.small)
-                Text(text)
+                Text(LocalizedStringKey(text))
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -2091,7 +2091,7 @@ struct CellDistributionView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    GroupBox(tab) {
+                    GroupBox(LocalizedStringKey(tab)) {
                         VStack(alignment: .leading, spacing: 14) {
                             if tab == "Region masks" {
                                 regionBoundaryPicker
@@ -2135,12 +2135,12 @@ struct CellDistributionView: View {
                                 }
                                 store.runCellDistributionAnalysis(outputMode: cellDistributionOutputMode)
                             } label: {
-                                Label(cellDistributionRunButtonTitle, systemImage: "play.fill")
+                                Label(LocalizedStringKey(cellDistributionRunButtonTitle), systemImage: "play.fill")
                             }
                                 .spatialScopeProminentButtonStyle()
                                 .disabled(runButtonDisabled)
                             if let blocker = cellDistributionRunBlocker {
-                                Text(blocker)
+                                Text(LocalizedStringKey(blocker))
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
@@ -2772,7 +2772,7 @@ struct DistanceAnalysisView: View {
                     }
 
                     if let result = store.distanceAnalysisResult {
-                        GroupBox(tab) {
+                        GroupBox(LocalizedStringKey(tab)) {
                             if tab == "Nearest-neighbor distances" {
                                 nearestNeighborResult(result)
                             } else {
@@ -2875,7 +2875,7 @@ struct DistanceAnalysisView: View {
 
                     Picker("Filter", selection: $boundaryFilter) {
                         ForEach(DistanceBoundaryRegionFilter.allCases) { filter in
-                            Text(filter.title).tag(filter)
+                            Text(LocalizedStringKey(filter.title)).tag(filter)
                         }
                     }
                     .pickerStyle(.menu)

@@ -355,12 +355,12 @@ struct WorkflowStatusBadge: View {
     let status: WorkflowSectionStatus
 
     var body: some View {
-        Text(status.title)
+        Text(LocalizedStringKey(status.title))
             .font(.caption.weight(.semibold))
             .foregroundStyle(status.foregroundColor)
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .spatialScopeGlassCapsule(tint: status.foregroundColor.opacity(0.16))
-            .accessibilityLabel("Section status: \(status.title)")
+            .accessibilityLabel(Text(LocalizedStringKey(status.title)))
     }
 }

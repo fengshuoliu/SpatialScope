@@ -5,6 +5,11 @@ import OSLog
 
 @MainActor
 final class AppStore: ObservableObject {
+    @Published var uiLanguage: AppLanguage {
+        didSet {
+            UserDefaults.standard.set(uiLanguage.rawValue, forKey: AppLanguage.preferenceKey)
+        }
+    }
     @Published var selectedSection: AnalysisSection = .inputs
     @Published var inputFolder: URL
     @Published var outputFolder: URL
@@ -131,6 +136,7 @@ final class AppStore: ObservableObject {
         let monitor = ResourceMonitor()
         resourceMonitor = monitor
         resourceSnapshot = monitor.snapshot
+        uiLanguage = AppLanguage.initialValue()
 
         inputFolder = defaults.string(forKey: inputFolderKey)
             .map(URL.init(fileURLWithPath:))
@@ -189,8 +195,16 @@ final class AppStore: ObservableObject {
     }
 
     var pixelSizeText: String {
-        guard xUm > 0, yUm > 0, xPx > 0, yPx > 0 else { return "Figure resolution not set" }
-        return "Figure resolution \(Self.compactNumber(xUm)) x \(Self.compactNumber(yUm)) um; \(xPx) x \(yPx) px"
+        guard xUm > 0, yUm > 0, xPx > 0, yPx > 0 else {
+            return uiLanguage.localized("Figure resolution not set")
+        }
+        return String(
+            format: uiLanguage.localized("Figure resolution %@ x %@ um; %lld x %lld px"),
+            Self.compactNumber(xUm),
+            Self.compactNumber(yUm),
+            xPx,
+            yPx
+        )
     }
 
     var selectedOverlayChannels: [ChannelConfig] {

@@ -1,7 +1,7 @@
 cff-version: 1.2.0
 message: "If you use SpatialScope, please cite the software and the associated Cell article below."
 title: "SpatialScope"
-version: "1.0"
+version: "1.1"
 date-released: 2026-07-18
 type: software
 authors:

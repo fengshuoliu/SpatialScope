@@ -1,7 +1,5 @@
 # Simplified Chinese localization
 
-This directory reserves Simplified Chinese localization resources for SpatialScope.
+SpatialScope 1.1 includes a Simplified Chinese interface. The application follows the macOS system language by default, with explicit English and Simplified Chinese choices in the `Language/语言` control. The active resources are maintained in [`SpatialScope/zh-Hans.lproj/`](../../SpatialScope/zh-Hans.lproj/).
 
-Chinese support will be implemented in the canonical application rather than as a separate fork. Source identifiers, file formats, analysis parameters, and output schemas will remain language-independent so English and Chinese users can exchange projects reliably.
-
-The Simplified Chinese interface is not included in version 1.0.
+The localization is part of the canonical application rather than a separate fork. Changing the UI language does not alter the `SpatialScope` product name, source identifiers, file formats, analysis parameters, exported figures, or output schemas, so users can exchange projects reliably.

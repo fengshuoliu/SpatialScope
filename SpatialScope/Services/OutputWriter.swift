@@ -2135,14 +2135,20 @@ enum OutputWriter {
     static func loadLatestCellDistributionRegionMaskArtifacts(outputFolder: URL) throws -> CellDistributionRegionMaskArtifacts {
         let distributionDir = sectionURL("cell_distribution_analysis", outputFolder: outputFolder)
         let regionMasksDir = distributionDir.appendingPathComponent("01_region_masks")
-        guard let arraysURL = firstFile(in: regionMasksDir, prefix: "region_bands__", suffix: "__arrays.npz") else {
+        let inputsURL = firstFile(in: regionMasksDir, prefix: "region_bands__", suffix: "__inputs.json")
+        guard let arraysURL = matchingRegionMaskArtifact(
+            inputsURL: inputsURL,
+            suffix: "__arrays.npz"
+        ) ?? firstFile(in: regionMasksDir, prefix: "region_bands__", suffix: "__arrays.npz") else {
             throw SpatialScopeError.message("Generate Region masks before running Cell density.")
         }
-        guard let bandMapURL = firstFile(in: regionMasksDir, prefix: "region_bands__", suffix: "__band_map.png"),
+        guard let bandMapURL = matchingRegionMaskArtifact(
+            inputsURL: inputsURL,
+            suffix: "__band_map.png"
+        ) ?? firstFile(in: regionMasksDir, prefix: "region_bands__", suffix: "__band_map.png"),
               let bandMapImage = NSImage(contentsOf: bandMapURL) else {
             throw SpatialScopeError.message("The saved Region masks band map could not be loaded.")
         }
-        let inputsURL = firstFile(in: regionMasksDir, prefix: "region_bands__", suffix: "__inputs.json")
         let inputs = inputsURL
             .flatMap { try? Data(contentsOf: $0) }
             .flatMap { try? JSONDecoder().decode(RegionBandInputsCompatPayload.self, from: $0) }
@@ -2181,7 +2187,11 @@ enum OutputWriter {
         let regionMasksDir = distributionDir.appendingPathComponent("01_region_masks")
         let densityDir = distributionDir.appendingPathComponent("02_cell_density")
         let clusterDir = distributionDir.appendingPathComponent("03_cell_cluster_distribution")
-        guard let bandMapURL = firstFile(in: regionMasksDir, prefix: "region_bands__", suffix: "__band_map.png"),
+        let inputsURL = firstFile(in: regionMasksDir, prefix: "region_bands__", suffix: "__inputs.json")
+        guard let bandMapURL = matchingRegionMaskArtifact(
+            inputsURL: inputsURL,
+            suffix: "__band_map.png"
+        ) ?? firstFile(in: regionMasksDir, prefix: "region_bands__", suffix: "__band_map.png"),
               let mapImage = NSImage(contentsOf: bandMapURL) else {
             return nil
         }
@@ -2192,8 +2202,13 @@ enum OutputWriter {
             .flatMap { NSImage(contentsOf: $0) }
             ?? NSImage(size: NSSize(width: 1, height: 1))
         let size = ImageExportService.pixelSize(for: mapImage)
-        let boundaryLabel = streamlitBoundaryLabel(from: bandMapURL)
-        let bandWidthUm = streamlitBandWidth(from: bandMapURL) ?? 10.0
+        let inputs = inputsURL
+            .flatMap { try? Data(contentsOf: $0) }
+            .flatMap { try? JSONDecoder().decode(RegionBandInputsCompatPayload.self, from: $0) }
+        let savedBoundaryLabel = inputs?.boundaryLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let boundaryLabel = savedBoundaryLabel.flatMap { $0.isEmpty ? nil : $0 }
+            ?? streamlitBoundaryLabel(from: bandMapURL)
+        let bandWidthUm = inputs?.bandWidthUm ?? streamlitBandWidth(from: bandMapURL) ?? 10.0
         let regionCSV = firstFile(in: densityDir, prefix: "cell_density__", suffix: "__region.csv")
         let regionRows = regionCSV.flatMap { csvTable(from: $0) } ?? []
         let regionSummaries = streamlitRegionSummaries(
@@ -2593,6 +2608,17 @@ enum OutputWriter {
                 return left.lastPathComponent.localizedStandardCompare(right.lastPathComponent) == .orderedAscending
             }
             .first
+    }
+
+    private static func matchingRegionMaskArtifact(inputsURL: URL?, suffix: String) -> URL? {
+        guard let inputsURL else { return nil }
+        let inputsSuffix = "__inputs.json"
+        let fileName = inputsURL.lastPathComponent
+        guard fileName.hasSuffix(inputsSuffix) else { return nil }
+        let baseName = String(fileName.dropLast(inputsSuffix.count))
+        let candidate = inputsURL.deletingLastPathComponent()
+            .appendingPathComponent(baseName + suffix)
+        return FileManager.default.fileExists(atPath: candidate.path) ? candidate : nil
     }
 
     private static func csvTable(from url: URL) -> [[String: String]] {

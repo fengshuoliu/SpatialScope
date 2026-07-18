@@ -79,7 +79,7 @@ struct CellTypeAssignmentsView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Picker("Mode", selection: $store.assignmentRunMode) {
                         ForEach(AssignmentRunMode.allCases) { mode in
-                            Text(mode.title).tag(mode)
+                            Text(LocalizedStringKey(mode.title)).tag(mode)
                         }
                     }
                     .pickerStyle(.segmented)
@@ -340,7 +340,7 @@ struct CellTypeAssignmentsView: View {
     private var assignmentSubsetControls: some View {
         Picker("Screening subset", selection: $store.assignmentScreeningSubsetMode) {
             ForEach(AssignmentScreeningSubsetMode.allCases) { mode in
-                Text(mode.title).tag(mode)
+                Text(LocalizedStringKey(mode.title)).tag(mode)
             }
         }
         .pickerStyle(.segmented)
@@ -506,12 +506,15 @@ private struct AssignmentScreeningSubsetDiagram: View {
     var configuredHeight: Int
 
     var body: some View {
+        let values = selectedValues
+        let valuesText = values.isEmpty ? Text("none") : Text(verbatim: values)
+
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Label("Screening area", systemImage: "rectangle.split.3x1")
                     .font(.caption.weight(.semibold))
                 Spacer()
-                Text(selectedSummary)
+                (Text("Selected: ") + valuesText)
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
@@ -560,13 +563,12 @@ private struct AssignmentScreeningSubsetDiagram: View {
         return CGSize(width: maxSize.width, height: maxSize.width / configuredAspectRatio)
     }
 
-    private var selectedSummary: String {
-        let values = selectedBands
+    private var selectedValues: String {
+        selectedBands
             .filter { $0 >= 0 && $0 < safeBandCount }
             .sorted()
             .map { String($0 + 1) }
             .joined(separator: ", ")
-        return "Selected: \(values.isEmpty ? "none" : values)"
     }
 }
 
@@ -577,11 +579,11 @@ private struct AssignmentIntegerParameter: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title)
+            Text(LocalizedStringKey(title))
                 .font(.caption.weight(.semibold))
             Stepper("\(value)", value: $value, in: 0...50_000)
                 .font(.system(.body, design: .monospaced))
-            Text(description)
+            Text(LocalizedStringKey(description))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -651,9 +653,15 @@ private struct MarkerSelectionMenu: View {
             }
         } label: {
             HStack {
-                Text(selection.isEmpty ? title : selection)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                if selection.isEmpty {
+                    Text(LocalizedStringKey(title))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                } else {
+                    Text(selection)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
                 Spacer()
                 Image(systemName: "chevron.down")
                     .font(.caption)

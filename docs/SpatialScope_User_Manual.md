@@ -195,6 +195,7 @@ The sidebar status is a convenience indicator, not a validation guarantee. For e
 ### 3.4 Useful interface behavior
 
 - Click any sidebar step to open it.
+- Use the sidebar **Language/语言** control to follow the macOS system language or explicitly select English or Simplified Chinese. The preference changes UI text only; it does not change the `SpatialScope` name or any exported data, filenames, schemas, analysis parameters, or generated figures.
 - Use **Command-O** to choose an input folder.
 - Use **Command-R** to generate the overlay.
 - Image previews can be scrolled when zoomed.

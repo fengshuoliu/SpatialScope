@@ -10,4 +10,4 @@ Planned conventions:
 - Shared file formats, analysis definitions, and output contracts
 - Windows-specific packaging and update code kept inside this directory
 
-The Windows build is not included in version 1.0.
+The Windows build is not included in version 1.1.

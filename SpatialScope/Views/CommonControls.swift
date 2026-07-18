@@ -28,7 +28,11 @@ struct StatusBarView: View {
                 Image(systemName: statusSymbol)
                     .foregroundStyle(statusColor)
             }
-            Text(store.statusMessage.isEmpty ? "Ready" : store.statusMessage)
+            Text(
+                store.uiLanguage.localizedStatusMessage(
+                    store.statusMessage.isEmpty ? "Ready" : store.statusMessage
+                )
+            )
                 .foregroundStyle(.primary)
                 .lineLimit(2)
             Spacer()
@@ -79,7 +83,16 @@ struct ResourceAllocationControl: View {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: "cpu")
                     .foregroundStyle(Color.accentColor)
-                Text("CPU limit is enforced as a maximum worker count. \(contextLabel) can use up to \(store.configuredCPUWorkerCount) of \(store.resourceSnapshot.activeCPUCoreCount) active cores.")
+                Text(
+                    String(
+                        format: store.uiLanguage.localized(
+                            "CPU limit is enforced as a maximum worker count. %@ can use up to %lld of %lld active cores."
+                        ),
+                        store.uiLanguage.localized(contextLabel),
+                        store.configuredCPUWorkerCount,
+                        store.resourceSnapshot.activeCPUCoreCount
+                    )
+                )
                     .fixedSize(horizontal: false, vertical: true)
             }
             .font(.caption)
@@ -117,11 +130,17 @@ struct ResourceAllocationControl: View {
 
     private var gpuStatusText: String {
         guard store.hasGPU else {
-            return "No Metal GPU detected."
+            return store.uiLanguage.localized("No Metal GPU detected.")
         }
         let names = store.resourceSnapshot.gpuNames.joined(separator: ", ")
         let usage = store.resourceSnapshot.gpuUsagePercent ?? 0
-        return "Metal GPU monitoring: \(names), currently \(usage.formatted(.number.precision(.fractionLength(0))))%. Nuclei and cell-type methods remain CPU-only so their numerical method is unchanged."
+        return String(
+            format: store.uiLanguage.localized(
+                "Metal GPU monitoring: %@, currently %@%%. Nuclei and cell-type methods remain CPU-only so their numerical method is unchanged."
+            ),
+            names,
+            usage.formatted(.number.precision(.fractionLength(0)))
+        )
     }
 }
 
@@ -133,7 +152,7 @@ struct FolderRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Label(title, systemImage: systemImage)
+            Label(LocalizedStringKey(title), systemImage: systemImage)
                 .font(.headline)
                 .frame(width: 150, alignment: .leading)
             Text(url.path)
@@ -145,7 +164,7 @@ struct FolderRow: View {
             Button(action: action) {
                 Label("Choose", systemImage: "folder.badge.plus")
             }
-            .help("Choose \(title.lowercased())")
+            .help(Text("Choose folder"))
         }
     }
 }
@@ -162,9 +181,9 @@ struct EmptyStateView: View {
                 .foregroundStyle(Color.accentColor)
                 .frame(width: 62, height: 62)
                 .spatialScopeGlassSurface(cornerRadius: 8, tint: Color.accentColor.opacity(0.12))
-            Text(title)
+            Text(LocalizedStringKey(title))
                 .font(.title3.weight(.semibold))
-            Text(message)
+            Text(LocalizedStringKey(message))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 420)
@@ -181,7 +200,7 @@ struct ImagePreviewPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label(title, systemImage: "photo.on.rectangle.angled")
+            Label(LocalizedStringKey(title), systemImage: "photo.on.rectangle.angled")
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(.secondary)
             if let image {

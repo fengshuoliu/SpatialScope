@@ -155,7 +155,7 @@ struct NucleiSegmentationView: View {
     private var nucleiModePicker: some View {
         Picker("Run mode", selection: $store.nucleiRunMode) {
             ForEach(NucleiRunMode.allCases) { mode in
-                Text(mode.title).tag(mode)
+                Text(LocalizedStringKey(mode.title)).tag(mode)
             }
         }
         .pickerStyle(.segmented)
@@ -367,7 +367,7 @@ struct ParameterSlider: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 10) {
-                Text(displayTitle)
+                Text(LocalizedStringKey(displayTitle))
                     .font(.caption.weight(.semibold))
                     .frame(width: 180, alignment: .leading)
                     .lineLimit(1)
@@ -379,7 +379,7 @@ struct ParameterSlider: View {
                     .frame(width: 62, alignment: .trailing)
             }
             if let description {
-                Text(description)
+                Text(LocalizedStringKey(description))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -196,6 +196,7 @@ struct SpatialScopeApp: App {
         WindowGroup("SpatialScope", id: "main") {
             ContentView()
                 .environmentObject(store)
+                .environment(\.locale, store.uiLanguage.locale)
                 .tint(Color.accentColor)
                 .frame(minWidth: 1180, minHeight: 780)
         }
@@ -203,16 +204,19 @@ struct SpatialScopeApp: App {
         .windowToolbarStyle(.unified(showsTitle: true))
         .commands {
             CommandGroup(after: .appInfo) {
-                CheckForUpdatesView(updater: updaterController.updater)
+                CheckForUpdatesView(
+                    updater: updaterController.updater,
+                    language: store.uiLanguage
+                )
             }
 
             CommandGroup(after: .newItem) {
-                Button("Choose Input Folder...") {
+                Button(store.uiLanguage.localized("Choose Input Folder...")) {
                     store.chooseInputFolder()
                 }
                 .keyboardShortcut("o", modifiers: [.command])
 
-                Button("Generate Overlay") {
+                Button(store.uiLanguage.localized("Generate Overlay")) {
                     store.generateOverlay()
                 }
                 .keyboardShortcut("r", modifiers: [.command])

@@ -15,15 +15,17 @@ final class CheckForUpdatesViewModel: ObservableObject {
 struct CheckForUpdatesView: View {
     @ObservedObject private var viewModel: CheckForUpdatesViewModel
     private let updater: SPUUpdater
+    private let language: AppLanguage
 
     @MainActor
-    init(updater: SPUUpdater) {
+    init(updater: SPUUpdater, language: AppLanguage) {
         self.updater = updater
+        self.language = language
         viewModel = CheckForUpdatesViewModel(updater: updater)
     }
 
     var body: some View {
-        Button("Check for Updates...", action: updater.checkForUpdates)
+        Button(language.localized("Check for Updates..."), action: updater.checkForUpdates)
             .disabled(!viewModel.canCheckForUpdates)
     }
 }

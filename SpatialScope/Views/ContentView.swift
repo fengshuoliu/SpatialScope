@@ -100,9 +100,9 @@ private struct DetailHeaderView: View {
                 Text("STEP \(section.stepNumber) OF \(AnalysisSection.allCases.count)")
                     .font(.caption2.weight(.bold))
                     .foregroundStyle(Color.accentColor)
-                Text(section.title)
+                Text(LocalizedStringKey(section.title))
                     .font(.system(size: 25, weight: .semibold))
-                Text(section.subtitle)
+                Text(LocalizedStringKey(section.subtitle))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
