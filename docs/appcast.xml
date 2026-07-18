@@ -3,15 +3,25 @@
     <channel>
         <title>SpatialScope</title>
         <item>
-            <title>1.0</title>
-            <pubDate>Sat, 18 Jul 2026 17:07:18 -0400</pubDate>
+            <title>1.1</title>
+            <pubDate>Sat, 18 Jul 2026 19:02:05 -0400</pubDate>
             <link>https://fengshuoliu.github.io/SpatialScope/</link>
-            <sparkle:version>1</sparkle:version>
-            <sparkle:shortVersionString>1.0</sparkle:shortVersionString>
+            <sparkle:version>2</sparkle:version>
+            <sparkle:shortVersionString>1.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
             <description sparkle:format="markdown"><![CDATA[# Changelog
 
 All notable changes to SpatialScope are documented here.
+
+## 1.1 - 2026-07-18
+
+- Added an in-app language selector that follows macOS by default, with explicit English and Simplified Chinese choices.
+- Kept the language control label bilingual as `Language/语言` in every interface mode.
+- Kept the `SpatialScope` product name unchanged in both interface languages.
+- Kept analysis methods, exported data, filenames, schemas, and generated figure text language-independent from the UI preference.
+- Fixed a launch-time crash caused by localized workflow status accessibility labels.
+- Fixed Cell Distribution reloads so region-mask files always come from the same saved analysis run.
+- Updated the project website and documentation for the new interface option.
 
 ## 1.0 - 2026-07-18
 
@@ -26,7 +36,7 @@ All notable changes to SpatialScope are documented here.
 
 Earlier Streamlit-based development is preserved in the [TME Spatial repository](https://github.com/fengshuoliu/TME_spatial).
 ]]></description>
-            <enclosure url="https://github.com/fengshuoliu/SpatialScope/releases/download/v1.0/SpatialScope-macOS-universal.zip" length="134439282" type="application/octet-stream" sparkle:edSignature="dxVni8gza2wTh6ayCHUp5veS3Ap3pF1dBK8xyTAkqz2RWV60WsJC/w1nhmrJcGtHvPPzKxj5L+6wRdkJ+TUhAA=="/>
+            <enclosure url="https://github.com/fengshuoliu/SpatialScope/releases/download/v1.1/SpatialScope-macOS-universal.zip" length="134494419" type="application/octet-stream" sparkle:edSignature="WWIIELshyIPRrPtF09W1BRhqhUIDgZHd8r+boM2gD01Cndz3nD+ILAoEelf+PAbH6f+cCBmmfBgSDhq/d87fBQ=="/>
         </item>
     </channel>
 </rss>
