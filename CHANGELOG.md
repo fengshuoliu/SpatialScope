@@ -2,7 +2,16 @@
 
 All notable changes to SpatialScope are documented here.
 
-## 1.2.1 - 2026-07-19
+## 2.0.0 - 2026-07-19 (Windows)
+
+- Replaced the legacy Electron/Streamlit Windows shell with a native WPF/.NET desktop application and a private frozen analysis engine.
+- Distributed Windows as a self-contained portable ZIP; users do not need an installer, browser, Node.js, Python, or the .NET SDK.
+- Fixed packaged Step 2 SVG generation by explicitly bundling and testing the Matplotlib Agg and SVG backends.
+- Added native input and output folder selection, bilingual interface text, live app CPU usage, parameter guidance, and sequential workflow status colors.
+- Verified the packaged engine with Step 2 and complete nine-stage smoke tests.
+- Retired the Windows 1.2.0 NSIS installer and portable executable. Use the native 2.0.0 portable ZIP instead.
+
+## 1.2.1 - 2026-07-19 (macOS)
 
 - Fixed the Simplified Chinese nuclei segmentation result message that could crash the app when a saved result was opened.
 - Added a compact SpatialScope menu bar item for showing the app, checking for updates, and quitting.

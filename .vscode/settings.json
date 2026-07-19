@@ -1,0 +1,13 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}\\windows\\.venv\\Scripts\\python.exe",
+  "files.exclude": {
+    "**/__pycache__": true,
+    "windows/build": true,
+    "windows/native/dist": true,
+    "windows/native/src/**/bin": true,
+    "windows/native/src/**/obj": true,
+    "windows/desktop/dist": true,
+    "windows/desktop/node_modules": true
+  },
+  "terminal.integrated.defaultProfile.windows": "PowerShell"
+}

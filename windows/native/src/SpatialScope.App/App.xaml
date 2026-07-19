@@ -1,0 +1,18 @@
+<Application x:Class="SpatialScope.Windows.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             StartupUri="MainWindow.xaml">
+    <Application.Resources>
+        <FontFamily x:Key="InterfaceFont">Segoe UI Variable Text, Microsoft YaHei UI, Microsoft YaHei, Segoe UI</FontFamily>
+        <FontFamily x:Key="DisplayFont">Segoe UI Variable Display, Microsoft YaHei UI, Microsoft YaHei, Segoe UI</FontFamily>
+        <SolidColorBrush x:Key="AccentBrush" Color="#087E8B" />
+        <SolidColorBrush x:Key="ReadyBrush" Color="#1976D2" />
+        <SolidColorBrush x:Key="RunningBrush" Color="#EF8A17" />
+        <SolidColorBrush x:Key="CompleteBrush" Color="#2F9E5B" />
+        <SolidColorBrush x:Key="ErrorBrush" Color="#C73E4D" />
+        <SolidColorBrush x:Key="TextBrush" Color="#182126" />
+        <SolidColorBrush x:Key="SecondaryTextBrush" Color="#647178" />
+        <SolidColorBrush x:Key="PanelBorderBrush" Color="#D6DEE1" />
+        <SolidColorBrush x:Key="PanelBrush" Color="#F9FFFFFF" />
+    </Application.Resources>
+</Application>

@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>SpatialScope</AssemblyName>
+    <RootNamespace>SpatialScope.Windows</RootNamespace>
+    <ApplicationIcon>..\..\..\desktop\assets\SpatialScope.ico</ApplicationIcon>
+    <Version>2.0.0</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <Authors>SpatialScope</Authors>
+    <Product>SpatialScope for Windows</Product>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="..\..\..\desktop\assets\SpatialScope.png" Link="Assets\SpatialScope.png" />
+  </ItemGroup>
+
+</Project>
