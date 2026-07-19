@@ -740,7 +740,7 @@ Step 7 has three tabs: **Region masks**, **Cell density**, and **Cell cluster di
 
 ### 11.1 Cell Distribution runtime
 
-The distributed macOS application includes a self-contained Cell Distribution helper for Apple Silicon and Intel Macs. It bundles the required Python runtime and scientific libraries; users do not need a separate Python installation or the legacy TME Spatial project.
+The distributed macOS and Windows applications include a self-contained Cell Distribution runtime. It bundles the required Python runtime and scientific libraries; users do not need a separate Python installation or the legacy TME Spatial project.
 
 Developers rebuilding SpatialScope from source create these helpers with `script/build_cell_distribution_runtime.sh`. The release package script places both architecture-specific helpers inside the application bundle and the app selects the native helper at runtime.
 
