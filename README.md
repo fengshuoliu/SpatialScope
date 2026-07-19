@@ -66,6 +66,10 @@ The Windows build freezes the scientific analysis engine, runs deterministic Ste
 
 On macOS, SpatialScope uses [Sparkle](https://sparkle-project.org/) with EdDSA-signed archives. Windows releases are portable ZIP packages and are updated manually by downloading and replacing the extracted application folder. Release binaries are hosted by GitHub Releases.
 
+## Acknowledgements
+
+Image credit: Example figures were provided by Dr. Ling Wu from the [Zhang Lab](https://github.com/xzhanglab).
+
 ## Citation
 
 If SpatialScope supports your work, please cite:
