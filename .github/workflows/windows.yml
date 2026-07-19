@@ -1,0 +1,54 @@
+name: Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/windows.yml"
+      - "windows/**"
+      - ".gitignore"
+  pull_request:
+    paths:
+      - ".github/workflows/windows.yml"
+      - "windows/**"
+      - ".gitignore"
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: windows/backend/requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: windows/desktop/package-lock.json
+
+      - name: Build, test, and package Windows release
+        shell: pwsh
+        run: ./windows/build_release.ps1
+
+      - name: Upload Windows installers and update metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpatialScope-Windows-x64
+          path: |
+            windows/desktop/dist/SpatialScope-Windows-x64-Setup-*.exe
+            windows/desktop/dist/SpatialScope-Windows-x64-Setup-*.exe.blockmap
+            windows/desktop/dist/SpatialScope-Windows-x64-Portable-*.exe
+            windows/desktop/dist/latest.yml
+            windows/desktop/dist/SHA256SUMS-Windows.txt
+          if-no-files-found: error
+          retention-days: 14
