@@ -17,7 +17,6 @@ The current release supports macOS 13 or later on Apple Silicon and Intel Macs, 
 - [SpatialScope User Manual](docs/SpatialScope_User_Manual.md)
 - [SpatialScope and QuPath: Functional Comparison](docs/SpatialScope_vs_QuPath.md)
 - [Installation and update instructions](docs/INSTALLATION.md)
-- [Maintainer release guide](docs/RELEASING.md)
 - [Project website](https://fengshuoliu.github.io/SpatialScope/)
 
 ## Platform roadmap
