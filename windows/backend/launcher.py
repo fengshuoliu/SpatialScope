@@ -82,6 +82,7 @@ def main() -> int:
         "streamlit",
         "run",
         str(app_path),
+        "--global.developmentMode=false",
         "--server.headless=true",
         "--server.address=127.0.0.1",
         f"--server.port={args.port}",
