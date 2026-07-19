@@ -43,6 +43,7 @@ def configure_environment(args: argparse.Namespace) -> None:
 
 
 def run_smoke_test() -> int:
+    import app
     import matplotlib
     import numpy
     import pandas
@@ -51,6 +52,7 @@ def run_smoke_test() -> int:
     import streamlit
 
     versions = {
+        "app": str(Path(app.__file__).name),
         "matplotlib": matplotlib.__version__,
         "numpy": numpy.__version__,
         "pandas": pandas.__version__,
