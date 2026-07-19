@@ -1,0 +1,81 @@
+namespace SpatialScope.Windows.Models;
+
+public sealed record ParameterDefinition(
+    string Key,
+    string EnglishName,
+    string ChineseName,
+    double DefaultValue,
+    double Minimum,
+    double Maximum,
+    double Increment,
+    string Unit,
+    string EnglishExplanation,
+    string ChineseExplanation);
+
+public static class ParameterCatalog
+{
+    public static IReadOnlyList<ParameterDefinition> Nuclei { get; } =
+    [
+        new("min_diam_um", "Minimum diameter", "最小直径", 6, 0, 50, 0.5, "µm",
+            "Higher values remove small objects and noise but may lose true small nuclei; lower values retain smaller nuclei but admit more noise.",
+            "数值越大，越能去除小物体和噪声，但可能漏掉真实的小细胞核；数值越小，可保留更小的细胞核，但会引入更多噪声。"),
+        new("max_diam_um", "Maximum diameter", "最大直径", 60, 0, 300, 1, "µm",
+            "Higher values allow larger nuclei or clumps; lower values reject large objects but may lose true large nuclei.",
+            "数值越大，可保留更大的细胞核或团块；数值越小，会排除大物体，但可能漏掉真实的大细胞核。"),
+        new("tophat_radius_um", "Top-hat radius", "顶帽半径", 2, 0, 25, 0.25, "µm",
+            "A larger radius corrects background over a broader scale and retains larger bright structures; a smaller radius emphasizes finer bright structures.",
+            "较大的半径会在更宽尺度上校正背景并保留较大的亮结构；较小的半径会突出更细小的亮结构。"),
+        new("gauss_sigma_um", "Gaussian sigma", "高斯标准差", 0.5, 0, 10, 0.1, "µm",
+            "Higher values suppress noise but blur borders and may merge adjacent nuclei; lower values preserve detail and more noise.",
+            "数值越大，抑制噪声越强，但会模糊边界并可能合并相邻细胞核；数值越小，保留更多细节和噪声。"),
+        new("local_win_um", "Local window", "局部窗口", 25, 3, 250, 1, "µm",
+            "A larger window behaves more globally; a smaller window follows local staining changes but is more sensitive to local noise.",
+            "窗口越大，阈值越接近全局估计；窗口越小，越能跟随局部染色变化，但也更容易受局部噪声影响。"),
+        new("local_offset", "Local threshold offset", "局部阈值偏移", -0.03, -1, 1, 0.01, "",
+            "More positive values lower the computed threshold and usually detect more foreground; more negative values raise it and are stricter.",
+            "数值越正，计算阈值越低，通常会检测到更多前景；数值越负，阈值越高，筛选越严格。"),
+        new("h_maxima_um", "H-maxima peak threshold", "H 极大值峰阈值", 0.25, 0, 20, 0.05, "µm",
+            "Higher values require taller distance peaks and produce fewer seeds; lower values retain shallow peaks and may split more aggressively.",
+            "数值越大，要求距离峰更高并产生更少种子；数值越小，会保留较浅的峰，分割可能更激进。"),
+        new("seed_min_dist_um", "Minimum seed distance", "最小种子距离", 0.1, 0, 50, 0.1, "µm",
+            "Higher values keep centers farther apart and reduce over-splitting; lower values allow dense centers and may create extra splits.",
+            "数值越大，种子中心间距越远，可减少过度分割；数值越小，允许更密集的中心，可能产生额外分割。"),
+        new("watershed_compactness", "Watershed compactness", "分水岭紧致度", 0.5, 0, 10, 0.1, "",
+            "Higher values favor regular compact regions; lower values follow the image gradient more closely.",
+            "数值越大，越偏向规则紧致的区域；数值越小，边界越贴近图像梯度。"),
+        new("post_resplit_mult", "Post-resplit multiplier", "后重分割倍数", 0.5, 0, 10, 0.1, "× median",
+            "Higher values re-split only objects much larger than the median and are less aggressive; lower values qualify more objects for re-splitting.",
+            "数值越大，只会重分割明显大于中位数的物体，处理更保守；数值越小，会让更多物体进入重分割。"),
+    ];
+
+    public static IReadOnlyList<ParameterDefinition> Assignment { get; } =
+    [
+        new("r_voronoi_um", "Voronoi radius", "Voronoi 半径", 3, 0, 20, 0.25, "µm",
+            "Higher values let marker pixels farther from a nucleus belong to it; lower values keep ownership close and reduce crowded-cell spillover.",
+            "数值越大，离细胞核更远的标记像素也可归属于该细胞；数值越小，归属范围更靠近细胞核，可减少拥挤区域的串扰。"),
+        new("r_buffer_um", "Buffer radius", "缓冲半径", 2, 0, 20, 0.25, "µm",
+            "Higher values widen the disputed boundary area and can capture cytoplasmic signal but mix neighbors; lower values are stricter.",
+            "数值越大，争议边界区域越宽，可捕获更多胞质信号，但可能混入邻近细胞；数值越小，归属更严格。"),
+        new("r_vote_um", "Vote radius", "投票半径", 3, 0, 20, 0.25, "µm",
+            "Higher values aggregate evidence over a wider area and stabilize noise; lower values make voting more local and sensitive.",
+            "数值越大，会在更宽区域汇总证据并降低噪声影响；数值越小，投票更局部也更敏感。"),
+        new("tophat_r_um", "Top-hat radius", "顶帽半径", 1, 0, 8, 0.25, "µm",
+            "Higher values correct marker background over a broader scale and retain larger bright structures; lower values emphasize finer structures.",
+            "数值越大，会在更宽尺度校正标记背景并保留较大的亮结构；数值越小，会突出更细小的结构。"),
+        new("gauss_sigma_um", "Gaussian sigma", "高斯标准差", 0.5, 0, 3, 0.1, "µm",
+            "Higher values reduce speckle but blur small positives; lower values preserve sharp signal and more noise.",
+            "数值越大，可减少散斑但会模糊小阳性信号；数值越小，保留更锐利的信号以及更多噪声。"),
+        new("min_pos_object_size_px", "Minimum positive-object size", "最小阳性物体大小", 9, 0, 200, 1, "px",
+            "Higher values remove more small positive components; lower values preserve small true positives but admit speckle.",
+            "数值越大，会去除更多小阳性连通区域；数值越小，可保留真实的小阳性区域，但会引入散斑。"),
+        new("min_pos_pix", "Minimum positive pixels", "最少阳性像素", 5, 0, 200, 1, "px",
+            "Higher values make marker calls more conservative; lower values increase sensitivity to weak or small positives.",
+            "数值越大，标记判定越保守；数值越小，对微弱或较小阳性信号更敏感。"),
+        new("ambiguous_min_probability", "Minimum winning probability", "最低获胜概率", 0.60, 0, 0.99, 0.01, "",
+            "Higher values require stronger winning evidence and leave more cells Ambiguous; lower values accept weaker winners.",
+            "数值越大，需要更强的获胜证据，更多细胞会保留为模糊；数值越小，会接受证据较弱的获胜类型。"),
+        new("ambiguous_min_gap", "Minimum probability gap", "最小概率差", 0.10, 0, 0.50, 0.01, "",
+            "Higher values require greater separation from the runner-up; lower values assign borderline matches more aggressively.",
+            "数值越大，要求第一名与第二名之间差距更大；数值越小，会更积极地分配临界匹配。"),
+    ];
+}

@@ -496,7 +496,28 @@ def _run_celltype_assignment_impl(
             pos = morphology.remove_small_objects(pos, min_size=min_pos_object_size_px)
         return pos, float(thr)
 
-    assign_channels = [ch for ch in channel_names if (nuc_channel is None or ch != nuc_channel)]
+    required_marker_keys = {
+        marker_name_to_key(marker)
+        for cell_type in celltype_cfg
+        for marker in (
+            list(cell_type.get("all_pos", []))
+            + list(cell_type.get("all_neg", []))
+            + [
+                grouped_marker
+                for group in cell_type.get("any_pos_groups", [])
+                for grouped_marker in group
+            ]
+        )
+        if marker_name_to_key(marker) != NUC_KEY
+    }
+    # Match the macOS assignmentRelevantChannels behavior. Unused channels do
+    # not contribute evidence and must not spend minutes generating assignment
+    # maps that are discarded by every cell-type rule.
+    assign_channels = [
+        channel
+        for channel in channel_names
+        if marker_name_to_key(channel) in required_marker_keys
+    ]
     assign_maps: Dict[str, np.ndarray] = {}
     df_stats_list: List[pd.DataFrame] = []
     threshold_rows: List[Dict[str, Any]] = []
@@ -1738,13 +1759,59 @@ def _build_fixed_five_roi_assignment_subset(
     roi_height = max(1, min(full_height, int(round(full_height * math.sqrt(roi_fraction)))))
     gap_px = max(4, int(gap_px))
 
-    anchor_specs = [
-        ("upper_left", float(full_width) / 4.0, float(full_height) / 4.0, 0, 0),
-        ("upper_right", 3.0 * float(full_width) / 4.0, float(full_height) / 4.0, 0, 1),
-        ("center", float(full_width) / 2.0, float(full_height) / 2.0, 1, 0),
-        ("lower_left", float(full_width) / 4.0, 3.0 * float(full_height) / 4.0, 2, 0),
-        ("lower_right", 3.0 * float(full_width) / 4.0, 3.0 * float(full_height) / 4.0, 2, 1),
+    anchor_layout = [
+        ("upper_left", 0.25, 0.25, 0, 0),
+        ("upper_right", 0.75, 0.25, 0, 1),
+        ("center", 0.50, 0.50, 1, 0),
+        ("lower_left", 0.25, 0.75, 2, 0),
+        ("lower_right", 0.75, 0.75, 2, 1),
     ]
+
+    # Fixed image-quarter anchors can all miss sparse or off-center tissue. Use
+    # the same five spatial targets inside the detected-nuclei extent, then snap
+    # each target to a different nucleus centroid. Every optimizer ROI therefore
+    # contains labels while still sampling the tissue's corners and center.
+    anchor_specs: List[Tuple[str, float, float, int, int]] = []
+    region_properties = measure.regionprops_table(
+        labels.astype(np.int32, copy=False),
+        properties=("label", "centroid"),
+    )
+    centroid_x = np.asarray(region_properties.get("centroid-1", []), dtype=float)
+    centroid_y = np.asarray(region_properties.get("centroid-0", []), dtype=float)
+    if centroid_x.size:
+        min_x, max_x = float(np.min(centroid_x)), float(np.max(centroid_x))
+        min_y, max_y = float(np.min(centroid_y)), float(np.max(centroid_y))
+        span_x = max(1.0, max_x - min_x)
+        span_y = max(1.0, max_y - min_y)
+        available = np.ones(centroid_x.shape, dtype=bool)
+        for roi_name, x_fraction, y_fraction, row_idx, col_idx in anchor_layout:
+            target_x = min_x + x_fraction * span_x
+            target_y = min_y + y_fraction * span_y
+            distances = ((centroid_x - target_x) / span_x) ** 2 + ((centroid_y - target_y) / span_y) ** 2
+            if np.any(available):
+                distances = np.where(available, distances, np.inf)
+            selected_index = int(np.argmin(distances))
+            available[selected_index] = False
+            anchor_specs.append(
+                (
+                    roi_name,
+                    float(centroid_x[selected_index]),
+                    float(centroid_y[selected_index]),
+                    row_idx,
+                    col_idx,
+                )
+            )
+    else:
+        anchor_specs = [
+            (
+                roi_name,
+                x_fraction * float(full_width),
+                y_fraction * float(full_height),
+                row_idx,
+                col_idx,
+            )
+            for roi_name, x_fraction, y_fraction, row_idx, col_idx in anchor_layout
+        ]
 
     mosaic_height = int(roi_height * 3 + gap_px * 2)
     mosaic_width = int(roi_width * 2 + gap_px)
@@ -1797,6 +1864,7 @@ def _build_fixed_five_roi_assignment_subset(
                 },
                 "area_px": int((x1 - x0) * (y1 - y0)),
                 "area_fraction": float(((x1 - x0) * (y1 - y0)) / max(1, full_height * full_width)),
+                "anchor_source": "nucleus_centroid" if centroid_x.size else "image_geometry",
             }
         )
 

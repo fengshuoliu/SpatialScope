@@ -1,6 +1,6 @@
 # Install SpatialScope
 
-SpatialScope is distributed directly through [GitHub Releases](https://github.com/fengshuoliu/SpatialScope/releases/latest). It does not require an App Store or Microsoft Store account.
+SpatialScope is distributed directly through [GitHub Releases](https://github.com/fengshuoliu/SpatialScope/releases). It does not require an App Store or Microsoft Store account. macOS and Windows release independently, so use the platform-specific download links below.
 
 ## Windows 10 and 11
 
@@ -12,19 +12,19 @@ SpatialScope is distributed directly through [GitHub Releases](https://github.co
 
 ### Install
 
-1. Download `SpatialScope-Windows-x64-Setup-1.2.0.exe` from the latest GitHub release.
-2. Open the downloaded installer.
-3. If Microsoft Defender SmartScreen appears, select **More info**, confirm that the app name is SpatialScope, and select **Run anyway**.
-4. Choose the installation folder and finish setup.
-5. Open SpatialScope from the Start menu or desktop shortcut.
+1. Download [`SpatialScope-Windows-x64-Portable-2.0.0.zip`](https://github.com/fengshuoliu/SpatialScope/releases/download/windows-v2.0.0/SpatialScope-Windows-x64-Portable-2.0.0.zip).
+2. Verify the ZIP against `SHA256SUMS-Windows.txt` from the same Windows release.
+3. Extract the complete ZIP to a writable folder.
+4. Open the extracted folder and run `SpatialScope.exe`.
+5. If Microsoft Defender SmartScreen appears, select **More info**, confirm that the app name is SpatialScope, and select **Run anyway**.
 
-The installer is not signed with a commercial code-signing certificate. The SmartScreen prompt is expected for the first independently distributed release; it does not require disabling Windows Security. Organization-managed computers may require administrator approval.
+Keep the extracted `engine` folder beside `SpatialScope.exe`; moving only the executable makes the scientific workflows unavailable. SpatialScope is not signed with a commercial code-signing certificate. A SmartScreen prompt is expected for an independently distributed build and does not require disabling Windows Security. Organization-managed computers may require administrator approval.
 
-The release also includes `SpatialScope-Windows-x64-Portable-1.2.0.exe`. It can run without installation, but it does not install shortcuts or apply automatic updates. Replace the portable executable manually when a new version is released.
+The native Windows package does not run an installer or create Start-menu and desktop shortcuts. Create a shortcut to `SpatialScope.exe` manually if desired.
 
 ### Windows updates
 
-Installed copies check GitHub Releases automatically. When a new NSIS release is available, SpatialScope downloads it and asks to restart. You can also choose **Help > Check for Updates...**. Update downloads are validated against the SHA-512 digest in GitHub's `latest.yml` metadata.
+Windows updates are manual. Download the newer Windows portable ZIP from GitHub Releases, close SpatialScope, extract the complete package into a new folder, and run its `SpatialScope.exe`. Keep the previous folder until you have confirmed that the new version opens your data and outputs correctly.
 
 ## macOS 13 or later
 
@@ -58,7 +58,7 @@ Use **SpatialScope > Check for Updates...**. SpatialScope verifies update archiv
 
 ## Verify a download
 
-Each release contains separate SHA-256 checksum files for macOS and Windows. On macOS:
+The macOS and Windows platform releases include their corresponding SHA-256 checksum files. On macOS:
 
 ```bash
 shasum -a 256 ~/Downloads/SpatialScope-macOS-universal.dmg
@@ -67,7 +67,7 @@ shasum -a 256 ~/Downloads/SpatialScope-macOS-universal.dmg
 On Windows PowerShell:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 "$HOME\Downloads\SpatialScope-Windows-x64-Setup-1.2.0.exe"
+Get-FileHash -Algorithm SHA256 "$HOME\Downloads\SpatialScope-Windows-x64-Portable-2.0.0.zip"
 ```
 
-Compare the result with the corresponding checksum published on the same GitHub release.
+Compare the result with `SHA256SUMS.txt` for macOS or `SHA256SUMS-Windows.txt` for Windows on the corresponding platform release.

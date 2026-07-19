@@ -1,27 +1,62 @@
 # SpatialScope for Windows
 
-This directory contains the Windows x64 implementation within the canonical SpatialScope repository.
+SpatialScope 2.0 is a native Windows desktop application. Its interface is WPF/.NET, its analysis engine runs as a private local process, and it does not use Streamlit or a browser.
 
 ## Architecture
 
-- `backend/` is the complete Streamlit/scientific analysis application, frozen with PyInstaller for distribution.
-- `desktop/` is the Electron shell that owns the native window, folder pickers, application menu, lifecycle, and GitHub updater.
-- `tests/smoke_pipeline.py` runs every analysis stage and validates representative output files on synthetic tissue data.
-- `build_release.ps1` creates the frozen backend, validates it, and packages NSIS and portable releases.
+- `native/src/SpatialScope.App/` is the Windows WPF application and native folder-picker UI.
+- `backend/native_engine.py` exposes the scientific workflows over a compact JSON-lines protocol.
+- `backend/SpatialScopeEngine.spec` freezes the engine with both Matplotlib Agg and SVG backends.
+- `tests/native_overlay_smoke.py` reproduces configuration through Composite Preview (Step 2).
+- `tests/native_engine_smoke.py` exercises the complete nine-step workflow.
+- `run_native.ps1` prepares and runs the source application for local development.
+- `build_native.ps1` produces the self-contained portable Windows package.
 
-## Build
+The previous Electron/Streamlit implementation remains in `desktop/` and `backend/app.py` for compatibility and reference only. It is not used by the native 2.0 package.
 
-Run on 64-bit Windows 10 or 11 with Python 3.11 and Node.js 22:
+## Test and adjust locally
 
-```powershell
-./windows/build_release.ps1
+Visual Studio Community is the closest Windows equivalent to Xcode. Install the **.NET desktop development** workload, or use Visual Studio Code with the C# Dev Kit. The project targets 64-bit Windows 10/11 and .NET 10; Python 3.11 is used for source-level scientific development.
+
+Open this project in Visual Studio:
+
+```text
+windows/native/src/SpatialScope.App/SpatialScope.App.csproj
 ```
 
-Artifacts are written to `windows/desktop/dist/`:
+First prepare the isolated Python environment:
 
-- `SpatialScope-Windows-x64-Setup-<version>.exe`
-- `SpatialScope-Windows-x64-Portable-<version>.exe`
-- `latest.yml` and the NSIS blockmap used by automatic updates
-- `SHA256SUMS-Windows.txt`
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\windows\run_native.ps1 setup
+```
 
-The Windows build is available beginning with SpatialScope 1.2. The installer is intentionally unsigned, so Windows SmartScreen may require the user to choose **More info > Run anyway** on first installation.
+Then press **F5** in Visual Studio, or launch from a terminal:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\windows\run_native.ps1 run
+```
+
+The source application automatically starts `windows/backend/native_engine.py` from the isolated environment. Input and output path fields open the native Windows folder browser when clicked.
+
+Run the source renderer, WPF build, and complete nine-step scientific smoke test with:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\windows\run_native.ps1 test
+```
+
+## Build a portable release
+
+After source testing, create and validate the self-contained Windows package:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\windows\build_native.ps1 -FullSmoke
+```
+
+Once dependencies are already installed, add `-SkipDependencies` to save time. The build checks the frozen Matplotlib renderer, runs Step 2 against the frozen engine, optionally runs all nine workflow stages, and then writes:
+
+- `native/dist/SpatialScope-Windows-x64-Portable-2.0.0.zip`
+- `native/dist/SHA256SUMS-Windows.txt`
+
+Unzip the archive and run `SpatialScope.exe`; Python, Node.js, Electron, Streamlit, and the .NET SDK are not required on the test machine. The executable is currently unsigned, so Windows SmartScreen may require **More info > Run anyway** the first time.
+
+Do not distribute or test the older 1.2.0 package: that freeze omitted `matplotlib.backends.backend_svg`, which Step 2 imports when it saves SVG files. The native 2.0 build explicitly bundles and smoke-tests that backend.

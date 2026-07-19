@@ -8,9 +8,9 @@ SpatialScope is a desktop application for spatial image analysis from aligned, p
 
 [Download SpatialScope for macOS](https://github.com/fengshuoliu/SpatialScope/releases/latest/download/SpatialScope-macOS-universal.dmg)
 
-[Download SpatialScope for Windows](https://github.com/fengshuoliu/SpatialScope/releases/latest/download/SpatialScope-Windows-x64-Setup-1.2.0.exe)
+[Download SpatialScope 2.0.0 for Windows](https://github.com/fengshuoliu/SpatialScope/releases/download/windows-v2.0.0/SpatialScope-Windows-x64-Portable-2.0.0.zip)
 
-The current release supports macOS 13 or later on Apple Silicon and Intel Macs, plus 64-bit Windows 10 and 11. These independently distributed builds are not notarized by Apple or signed with a commercial Windows certificate, so follow the one-time approval steps in the [installation guide](docs/INSTALLATION.md).
+SpatialScope 1.2.1 for macOS supports macOS 13 or later on Apple Silicon and Intel Macs. SpatialScope 2.0.0 for Windows supports 64-bit Windows 10 and 11. These independently distributed builds are not notarized by Apple or signed with a commercial Windows certificate, so follow the one-time approval steps in the [installation guide](docs/INSTALLATION.md).
 
 ## Documentation
 
@@ -23,10 +23,10 @@ The current release supports macOS 13 or later on Apple Silicon and Intel Macs, 
 
 | Platform | Status | Repository location |
 | --- | --- | --- |
-| macOS | Available in version 1.2 | Current Xcode project |
-| Windows x64 | Available in version 1.2 | [`windows/`](windows/) |
+| macOS | Version 1.2.1 | Current Xcode project |
+| Windows x64 | Version 2.0.0 | [`windows/`](windows/) |
 
-Both platforms use the same `SpatialScope` product identity, release history, analysis definitions, and output contracts.
+Both platforms use the same `SpatialScope` product identity, analysis definitions, and output contracts. Platform versions and release tags are tracked independently.
 
 The language selector follows the operating system by default and can be set explicitly to English or Simplified Chinese from the sidebar. This changes UI text only; analysis methods, exported data, filenames, schemas, and the `SpatialScope` product name remain unchanged.
 
@@ -55,14 +55,14 @@ The package script creates ad-hoc-signed DMG and ZIP files under `build/release/
 Windows release builds are produced on a Windows x64 host:
 
 ```powershell
-./windows/build_release.ps1
+.\windows\build_native.ps1 -FullSmoke
 ```
 
-The Windows build freezes the scientific Python runtime, runs a deterministic end-to-end analysis smoke test, and creates both an NSIS installer and portable executable under `windows/desktop/dist/`. End users do not need Python or Node.js.
+The Windows build freezes the scientific analysis engine, runs deterministic Step 2 and complete nine-stage smoke tests, and creates `SpatialScope-Windows-x64-Portable-2.0.0.zip` under `windows/native/dist/`. The native WPF application is self-contained: extract the ZIP and run `SpatialScope.exe`. End users do not need Python, the .NET SDK, Node.js, Electron, Streamlit, or a browser.
 
 ## Updates
 
-On macOS, SpatialScope uses [Sparkle](https://sparkle-project.org/) with EdDSA-signed archives. On Windows, the NSIS installation checks GitHub Releases through `electron-updater`; portable builds require manual replacement. Release binaries are hosted by GitHub Releases.
+On macOS, SpatialScope uses [Sparkle](https://sparkle-project.org/) with EdDSA-signed archives. Windows releases are portable ZIP packages and are updated manually by downloading and replacing the extracted application folder. Release binaries are hosted by GitHub Releases.
 
 ## Citation
 

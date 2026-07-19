@@ -1220,8 +1220,9 @@ def load_nucleus_channel_image(
 
 
 def normalize_nucleus_image(dapi: np.ndarray) -> np.ndarray:
-    low, high = np.nanpercentile(dapi, [1, 99.8])
-    return np.clip((dapi - low) / max(1e-6, (high - low)), 0, 1)
+    high = float(np.nanpercentile(dapi, 99.8))
+    normalized = np.clip(dapi.astype(np.float64, copy=False) / max(1e-6, high), 0, 1)
+    return np.nan_to_num(normalized, nan=0.0, posinf=1.0, neginf=0.0)
 
 
 def _clamp_nuclei_roi_bounds(
@@ -1412,17 +1413,25 @@ def _build_vertical_band_nuclei_subset(
     }
 
 
+def _swift_round_nonnegative(value: float) -> int:
+    """Match Swift's `.rounded()` for the nonnegative pixel values used here."""
+    return int(math.floor(max(0.0, float(value)) + 0.5))
+
+
 def _pixel_converters(pixel_size_um: Tuple[float, float]):
     px_um_x, px_um_y = float(pixel_size_um[0]), float(pixel_size_um[1])
 
     def um_to_px_x(value_um: float) -> int:
-        return max(1, int(round(value_um / px_um_x)))
+        return max(1, _swift_round_nonnegative(value_um / px_um_x))
 
     def um_to_px_y(value_um: float) -> int:
-        return max(1, int(round(value_um / px_um_y)))
+        return max(1, _swift_round_nonnegative(value_um / px_um_y))
 
     def um_to_px_iso(value_um: float) -> int:
-        return max(1, int(round(value_um / np.sqrt(px_um_x * px_um_y))))
+        return max(
+            1,
+            _swift_round_nonnegative(value_um / np.sqrt(px_um_x * px_um_y)),
+        )
 
     return px_um_x, px_um_y, um_to_px_x, um_to_px_y, um_to_px_iso
 
@@ -1433,122 +1442,87 @@ def segment_nuclei_from_prepared_images(
     pixel_size_um: Tuple[float, float],
     params: NucleiParams,
 ) -> np.ndarray:
-    px_um_x, px_um_y, _, _, um_to_px_iso = _pixel_converters(pixel_size_um)
-
-    min_area_px = int(np.pi * (um_to_px_iso(params.min_diam_um) / 2.0) ** 2 * 0.25)
-    max_area_px = int(np.pi * (um_to_px_iso(params.max_diam_um) / 2.0) ** 2 * 4.0)
-    tophat_r_px = um_to_px_iso(params.tophat_radius_um)
+    del dapi  # The macOS implementation operates on the normalized channel.
+    px_um_x, px_um_y, _, _, _ = _pixel_converters(pixel_size_um)
     iso_scale_um = np.sqrt(px_um_x * px_um_y)
-    gauss_sigma = max(0.0, params.gauss_sigma_um / max(1e-12, iso_scale_um))
-    local_win = um_to_px_iso(params.local_win_um) | 1
-    h_maxima_val = max(0.0, float(params.h_maxima_um) / max(1e-12, iso_scale_um))
-    seed_min_dist = max(0, int(round(float(params.seed_min_dist_um) / max(1e-12, iso_scale_um))))
 
-    selem = morphology.disk(tophat_r_px)
-    dapi_th = morphology.white_tophat(dapi_norm, footprint=selem)
-    dapi_smooth = filters.gaussian(dapi_th, sigma=gauss_sigma, preserve_range=True)
+    def truncated_box_blur(image: np.ndarray, radius: int) -> np.ndarray:
+        if radius <= 0:
+            return image.astype(np.float64, copy=False)
+        size = radius * 2 + 1
+        values = image.astype(np.float64, copy=False)
+        ones = np.ones(values.shape, dtype=np.float64)
+        horizontal_sum = ndi.uniform_filter1d(
+            values, size=size, axis=1, mode="constant", cval=0.0
+        ) * float(size)
+        horizontal_count = ndi.uniform_filter1d(
+            ones, size=size, axis=1, mode="constant", cval=0.0
+        ) * float(size)
+        horizontal = np.divide(
+            horizontal_sum,
+            horizontal_count,
+            out=np.zeros_like(horizontal_sum),
+            where=horizontal_count > 0,
+        )
+        vertical_sum = ndi.uniform_filter1d(
+            horizontal, size=size, axis=0, mode="constant", cval=0.0
+        ) * float(size)
+        vertical_count = ndi.uniform_filter1d(
+            ones, size=size, axis=0, mode="constant", cval=0.0
+        ) * float(size)
+        return np.divide(
+            vertical_sum,
+            vertical_count,
+            out=np.zeros_like(vertical_sum),
+            where=vertical_count > 0,
+        )
 
-    local_thr = filters.threshold_local(dapi_smooth, block_size=local_win, offset=params.local_offset)
-    bw = dapi_smooth > local_thr
-
-    bw = morphology.remove_small_objects(bw, min_size=max(32, min_area_px))
-    bw = morphology.remove_small_holes(bw, area_threshold=max(64, min_area_px // 2))
-
-    lbl_tmp = measure.label(bw, connectivity=2)
-    if max_area_px > 0:
-        props_tmp = measure.regionprops(lbl_tmp)
-        drop_ids = {prop.label for prop in props_tmp if prop.area > max_area_px}
-        if drop_ids:
-            bw = ~np.isin(lbl_tmp, list(drop_ids))
-
-    dist = ndi.distance_transform_edt(bw)
-    dist_s = filters.gaussian(dist, sigma=0.5, preserve_range=True)
-
-    coords = feature.peak_local_max(
-        dist_s,
-        labels=bw,
-        min_distance=max(1, seed_min_dist),
-        threshold_abs=h_maxima_val,
-        exclude_border=False,
+    # Match SpatialScope/Services/NucleiSegmenter.swift so the same saved
+    # parameters produce comparable labels on macOS and Windows.
+    work = dapi_norm.astype(np.float64, copy=True)
+    tophat_px = _swift_round_nonnegative(
+        float(params.tophat_radius_um) / max(1e-12, iso_scale_um)
     )
+    if tophat_px > 0:
+        background = truncated_box_blur(work, min(tophat_px, 30))
+        work = np.maximum(0.0, work - background)
 
-    markers = np.zeros_like(dist_s, dtype=np.int32)
-    if len(coords) > 0:
-        markers[tuple(coords.T)] = np.arange(1, len(coords) + 1)
-    else:
-        markers = measure.label(bw)
-
-    grad = filters.sobel(dapi_th if gauss_sigma <= 0 else dapi_smooth)
-    labels = segmentation.watershed(
-        grad,
-        markers=markers,
-        mask=bw,
-        compactness=params.watershed_compactness,
-        watershed_line=True,
+    sigma_px = _swift_round_nonnegative(
+        float(params.gauss_sigma_um) / max(1e-12, iso_scale_um)
     )
+    if sigma_px > 0:
+        work = truncated_box_blur(work, min(max(1, sigma_px), 12))
 
-    props1 = measure.regionprops(labels)
-    if len(props1) >= 10:
-        areas = np.array([prop.area for prop in props1], dtype=float)
-        med_area = np.median(areas[areas > 0]) if np.any(areas > 0) else 0
-        if med_area > 0:
-            big_ids = [prop.label for prop in props1 if prop.area >= params.post_resplit_mult * med_area]
-            if big_ids:
-                lab_refined = labels.copy()
-                for lab_id in big_ids:
-                    region_mask = labels == lab_id
-                    if region_mask.sum() < 20:
-                        continue
+    mean = float(np.mean(work))
+    std = float(np.std(work))
+    threshold_factor = (
+        0.56
+        + float(params.local_offset) * 2.0
+        + float(params.h_maxima_um) * 0.18
+        + float(params.seed_min_dist_um) * 0.012
+        + float(params.watershed_compactness) * 0.018
+        - float(params.post_resplit_mult) * 0.010
+    )
+    threshold = min(max(mean + std * threshold_factor, 0.01), 0.98)
+    mask = work >= threshold
 
-                    bbox = measure.regionprops(region_mask.astype(np.uint8))[0].bbox
-                    minr, minc, maxr, maxc = bbox
-                    pad = 4
-                    minr = max(0, minr - pad)
-                    minc = max(0, minc - pad)
-                    maxr = min(labels.shape[0], maxr + pad)
-                    maxc = min(labels.shape[1], maxc + pad)
+    min_radius_px = max(0.5, float(params.min_diam_um) / max(1e-12, iso_scale_um) / 2.0)
+    max_radius_px = max(
+        min_radius_px,
+        float(params.max_diam_um) / max(1e-12, iso_scale_um) / 2.0,
+    )
+    min_area_px = max(1, int(np.pi * min_radius_px * min_radius_px * 0.35))
+    max_area_px = max(min_area_px, int(np.pi * max_radius_px * max_radius_px * 1.75))
 
-                    sub_mask = region_mask[minr:maxr, minc:maxc]
-                    if sub_mask.sum() < 20:
-                        continue
-
-                    sub_dist = ndi.distance_transform_edt(sub_mask)
-                    sub_dist_s = filters.gaussian(sub_dist, sigma=0.5, preserve_range=True)
-
-                    sub_coords = feature.peak_local_max(
-                        sub_dist_s,
-                        labels=sub_mask,
-                        min_distance=max(1, seed_min_dist),
-                        threshold_abs=h_maxima_val,
-                        exclude_border=False,
-                    )
-                    if len(sub_coords) <= 1:
-                        continue
-
-                    sub_mark = np.zeros_like(sub_dist_s, dtype=np.int32)
-                    sub_mark[tuple(sub_coords.T)] = np.arange(1, len(sub_coords) + 1)
-
-                    sub_grad = grad[minr:maxr, minc:maxc]
-                    sub_lab = segmentation.watershed(
-                        sub_grad,
-                        markers=sub_mark,
-                        mask=sub_mask,
-                        compactness=params.watershed_compactness,
-                        watershed_line=True,
-                    )
-
-                    max_cur = lab_refined.max()
-                    sub_lab_w = sub_lab.copy()
-                    sub_lab_w[sub_lab_w > 0] += max_cur
-
-                    roi = lab_refined[minr:maxr, minc:maxc]
-                    roi[sub_mask] = sub_lab_w[sub_mask]
-                    lab_refined[minr:maxr, minc:maxc] = roi
-
-                labels = lab_refined
-
-    labels = measure.label(labels > 0, connectivity=2) * (labels > 0)
-    return labels.astype(np.int32)
+    component_labels, _ = ndi.label(mask, structure=ndi.generate_binary_structure(2, 1))
+    component_areas = np.bincount(component_labels.ravel())
+    valid_components = np.flatnonzero(
+        (component_areas >= min_area_px) & (component_areas <= max_area_px)
+    )
+    valid_components = valid_components[valid_components > 0]
+    remap = np.zeros(component_areas.shape[0], dtype=np.int32)
+    remap[valid_components] = np.arange(1, valid_components.size + 1, dtype=np.int32)
+    return remap[component_labels]
 
 
 def summarize_nuclei_labels(
@@ -1666,7 +1640,7 @@ def run_nuclei_segmentation(
     with _thread_limit_context(native_threads):
         labels = segment_nuclei_from_prepared_images(dapi, dapi_norm, pixel_size_um, params)
         n_nuclei = int(labels.max())
-        df_props, boundaries = summarize_nuclei_labels(labels, dapi, pixel_size_um)
+        df_props, boundaries = summarize_nuclei_labels(labels, dapi_norm, pixel_size_um)
     labels_u16 = labels.astype(np.uint16)
 
     summary_csv = save_dir / "nuclei_summary.csv"

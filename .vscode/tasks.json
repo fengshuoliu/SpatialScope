@@ -1,0 +1,82 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "SpatialScope: Setup Native Windows",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\windows\\run_native.ps1",
+        "setup"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "SpatialScope: Compile Native Windows",
+      "type": "process",
+      "command": "dotnet",
+      "args": [
+        "build",
+        "${workspaceFolder}\\windows\\native\\src\\SpatialScope.App\\SpatialScope.App.csproj",
+        "--configuration",
+        "Debug"
+      ],
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "SpatialScope: Build Native Windows",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "SpatialScope: Setup Native Windows",
+        "SpatialScope: Compile Native Windows"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "SpatialScope: Run Native Windows App",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\windows\\run_native.ps1",
+        "run"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "SpatialScope: Test Native Windows",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\windows\\run_native.ps1",
+        "test"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "SpatialScope: Build Native Windows Release",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}\\windows\\build_native.ps1",
+        "-FullSmoke"
+      ],
+      "problemMatcher": []
+    }
+  ]
+}
