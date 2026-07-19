@@ -181,34 +181,34 @@ try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDir
 try render("intro.png", outputDirectory: outputDirectory) {
     drawText(
         copy.availability,
-        x: 0, y: 238, width: 1080, height: 55,
-        size: 34, weight: .bold, foreground: color(120, 224, 209), alignment: .center
+        x: 0, y: 205, width: 1080, height: 68,
+        size: 42, weight: .bold, foreground: color(120, 224, 209), alignment: .center
     )
     drawText(
         "SpatialScope",
-        x: 0, y: 320, width: 1080, height: 115,
-        size: 88, weight: .bold, foreground: .white, alignment: .center
+        x: 0, y: 290, width: 1080, height: 150,
+        size: 112, weight: .bold, foreground: .white, alignment: .center
     )
     drawText(
         copy.tagline,
-        x: 0, y: 452, width: 1080, height: 70,
-        size: 37, weight: .medium, foreground: color(217, 228, 231), alignment: .center
+        x: 0, y: 452, width: 1080, height: 86,
+        size: 46, weight: .medium, foreground: color(217, 228, 231), alignment: .center
     )
     roundedBox(
-        NSRect(x: 340, y: 1268, width: 400, height: 72),
-        radius: 24,
+        NSRect(x: 290, y: 1240, width: 500, height: 92),
+        radius: 28,
         fill: color(12, 17, 24, 0.82),
         stroke: color(255, 255, 255, 0.16)
     )
     drawText(
         "macOS  +  Windows",
-        x: 340, y: 1283, width: 400, height: 48,
-        size: 31, weight: .semibold, foreground: .white, alignment: .center
+        x: 290, y: 1258, width: 500, height: 58,
+        size: 37, weight: .semibold, foreground: .white, alignment: .center
     )
     drawText(
         copy.stages,
-        x: 0, y: 1390, width: 1080, height: 55,
-        size: 29, weight: .medium, foreground: color(175, 194, 199), alignment: .center
+        x: 0, y: 1385, width: 1080, height: 68,
+        size: 36, weight: .medium, foreground: color(175, 194, 199), alignment: .center
     )
 }
 

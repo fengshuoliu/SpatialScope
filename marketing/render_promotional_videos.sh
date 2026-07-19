@@ -31,6 +31,7 @@ render_video() {
     mkdir -p "$cards_dir"
     /usr/bin/xcrun swift "$CARD_RENDERER" "$cards_dir" "$language"
 
+    # The intro alpha mask reveals the icon diagonally from bottom-left to top-right.
     ffmpeg -y -v warning \
     -loop 1 -framerate 30 -t 10 -i "$COMPOSITE" \
     -loop 1 -framerate 30 -t 10 -i "$ICON" \
@@ -46,19 +47,27 @@ render_video() {
     -loop 1 -framerate 30 -t 1.45 -i "$cards_dir/regions.png" \
     -loop 1 -framerate 30 -t 1.35 -i "$cards_dir/density.png" \
     -loop 1 -framerate 30 -t 2.20 -i "$cards_dir/end.png" \
-    -f lavfi -t 10 -i "aevalsrc=exprs='0.055*sin(2*PI*110*t)+0.035*sin(2*PI*164.81*t)+0.025*sin(2*PI*220*t)+0.055*sin(2*PI*660*t)*exp(-15*mod(t,1.15))|0.055*sin(2*PI*110*t+0.12)+0.035*sin(2*PI*164.81*t+0.22)+0.025*sin(2*PI*220*t+0.32)+0.055*sin(2*PI*770*t)*exp(-15*mod(t,1.15))':s=44100:c=stereo" \
     -filter_complex "
         [0:v]scale=2866:1920,crop=1080:1920,
             boxblur=34:8,eq=brightness=-0.58:contrast=1.08:saturation=0.82,
             drawbox=x=0:y=0:w=iw:h=ih:color=0x05070C@0.58:t=fill,
             trim=duration=10,setpts=PTS-STARTPTS,format=rgba[background];
 
-        [1:v]split=4[icon_intro][icon_intro_glow][icon_brand][icon_end];
-        [icon_intro]scale=390:390,format=rgba,
-            fade=t=in:st=0.18:d=0.55:alpha=1,fade=t=out:st=2.02:d=0.30:alpha=1[intro_icon];
-        [icon_intro_glow]scale=500:500,format=rgba,colorchannelmixer=aa=0.30,
-            boxblur=28:10,fade=t=in:st=0.15:d=0.55:alpha=1,
+        [1:v]split=3[icon_intro_source][icon_brand][icon_end];
+        [icon_intro_source]trim=duration=2.35,setpts=PTS-STARTPTS,
+            scale=520:520,format=rgba,split=3[icon_reveal_source][icon_glow_source][icon_shine_source];
+        [icon_reveal_source]geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':
+            a='alpha(X,Y)*clip((((T-0.18)/1.05)-((X+(H-1-Y))/(W+H-2)))*14,0,1)',
+            fade=t=out:st=2.02:d=0.30:alpha=1[intro_icon];
+        [icon_glow_source]geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':
+            a='alpha(X,Y)*clip((((T-0.18)/1.05)-((X+(H-1-Y))/(W+H-2)))*14,0,1)',
+            pad=900:900:(ow-iw)/2:(oh-ih)/2:color=black@0,
+            boxblur=65:14,colorchannelmixer=aa=0.30,
             fade=t=out:st=2.02:d=0.30:alpha=1[intro_glow];
+        [icon_shine_source]geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':
+            a='alpha(X,Y)*clip(1-abs((((T-0.18)/1.05)-((X+(H-1-Y))/(W+H-2)))*15),0,1)',
+            lutrgb=r=145:g=255:b=235:a=val,boxblur=7:3,colorchannelmixer=aa=0.72,
+            fade=t=out:st=2.02:d=0.30:alpha=1[intro_shine];
         [icon_brand]scale=76:76,format=rgba,fade=t=in:st=2.15:d=0.18:alpha=1,
             fade=t=out:st=7.72:d=0.20:alpha=1[brand_icon];
         [icon_end]trim=duration=2.20,scale=230:230,format=rgba,setpts=PTS+7.80/TB,
@@ -95,9 +104,10 @@ render_video() {
         [13:v]scale=1080:1920,format=rgba,fade=t=in:st=0:d=0.28:alpha=1,
             setpts=PTS+7.80/TB[card_end];
 
-        [background][intro_glow]overlay=x=(W-w)/2:y=675:eof_action=pass[s1];
-        [s1][intro_icon]overlay=x=(W-w)/2:y=730:eof_action=pass[s2];
-        [s2][card_intro]overlay=x=0:y=0:eof_action=pass[s3];
+        [background][intro_glow]overlay=x=(W-w)/2:y=455:eof_action=pass[s1];
+        [s1][intro_icon]overlay=x=(W-w)/2:y=645:eof_action=pass[s2];
+        [s2][intro_shine]overlay=x=(W-w)/2:y=645:eof_action=pass[s2a];
+        [s2a][card_intro]overlay=x=0:y=0:eof_action=pass[s3];
         [s3][card_composite]overlay=x=0:y=0:eof_action=pass[s4];
         [s4][shot_composite]overlay=x=60:y=620:eof_action=pass[s5];
         [s5][card_nuclei]overlay=x=0:y=0:eof_action=pass[s6];
@@ -112,17 +122,11 @@ render_video() {
         [s14][end_icon]overlay=x=(W-w)/2:y=270:eof_action=pass[s15];
         [s15][card_end]overlay=x=0:y=0:eof_action=pass,
             fade=t=in:st=0:d=0.18,fade=t=out:st=9.72:d=0.28,
-            format=yuv420p,setsar=1[video];
-
-        [14:a]atrim=start=0:end=10,asetpts=PTS-STARTPTS,
-            highpass=f=70,lowpass=f=5000,aecho=0.82:0.45:170|340:0.16|0.08,
-            volume=14dB,
-            alimiter=limit=0.891:level=false:latency=true,
-            afade=t=in:st=0:d=0.15,afade=t=out:st=9.35:d=0.65[audio]
+            format=yuv420p,setsar=1[video]
     " \
-    -map "[video]" -map "[audio]" -map_metadata -1 -map_chapters -1 \
+    -map "[video]" -an -map_metadata -1 -map_chapters -1 \
     -t 10 -r 30 -c:v libx264 -profile:v high -level 4.1 -preset medium -crf 18 \
-    -pix_fmt yuv420p -color_range tv -movflags +faststart -c:a aac -b:a 192k "$output_video"
+    -pix_fmt yuv420p -color_range tv -movflags +faststart "$output_video"
 
     ffmpeg -y -v error -ss 8.9 -i "$output_video" -frames:v 1 \
         "$OUTPUT_DIR/SpatialScope-Promotional-Poster-${language_name}-9x16.jpg"
