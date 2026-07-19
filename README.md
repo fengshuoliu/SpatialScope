@@ -6,7 +6,7 @@ SpatialScope is a desktop application for spatial image analysis from aligned, p
 
 ## Download
 
-[Download SpatialScope for macOS](https://github.com/fengshuoliu/SpatialScope/releases/latest/download/SpatialScope-macOS-universal.dmg)
+[Download the latest SpatialScope for macOS](https://github.com/fengshuoliu/SpatialScope/releases/latest/download/SpatialScope-macOS-universal.dmg)
 
 [Download SpatialScope 2.0.0 for Windows](https://github.com/fengshuoliu/SpatialScope/releases/download/windows-v2.0.0/SpatialScope-Windows-x64-Portable-2.0.0.zip)
 
