@@ -11,6 +11,7 @@ $RepositoryRoot = Split-Path -Parent $WindowsRoot
 $BackendRoot = Join-Path $WindowsRoot "backend"
 $TestsRoot = Join-Path $WindowsRoot "tests"
 $NativeRoot = Join-Path $WindowsRoot "native"
+$InstallerScript = Join-Path $WindowsRoot "installer\SpatialScope.nsi"
 $ProjectPath = Join-Path $NativeRoot "src\SpatialScope.App\SpatialScope.App.csproj"
 $BuildRoot = Join-Path $WindowsRoot "build\native-release"
 $PyInstallerWork = Join-Path $BuildRoot "pyinstaller-work"
@@ -18,6 +19,7 @@ $EngineDistRoot = Join-Path $BuildRoot "engine-dist"
 $PublishRoot = Join-Path $BuildRoot "SpatialScope-Windows-x64"
 $EngineStage = Join-Path $PublishRoot "engine"
 $DistRoot = Join-Path $NativeRoot "dist"
+$InstallerSmokeRoot = Join-Path $BuildRoot "installer-smoke"
 $PythonExe = Join-Path $WindowsRoot ".venv\Scripts\python.exe"
 $SyntheticInput = Join-Path $WindowsRoot "build\smoke-output\synthetic_input"
 
@@ -33,6 +35,33 @@ function Assert-ChildPath([string]$Candidate, [string]$ExpectedParent) {
     if (-not $ResolvedCandidate.StartsWith("$ResolvedParent\", [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Refusing to modify a path outside $ResolvedParent`: $ResolvedCandidate"
     }
+}
+
+function Resolve-MakeNsis {
+    $Candidates = @()
+    if ($env:MAKENSIS_PATH) {
+        $Candidates += $env:MAKENSIS_PATH
+    }
+    $Command = Get-Command makensis.exe -ErrorAction SilentlyContinue
+    if ($Command) {
+        $Candidates += $Command.Source
+    }
+    $Candidates += @(
+        "C:\Program Files\NSIS\makensis.exe",
+        "C:\Program Files (x86)\NSIS\makensis.exe"
+    )
+    $ElectronBuilderCache = Join-Path $env:LOCALAPPDATA "electron-builder\Cache"
+    if (Test-Path -LiteralPath $ElectronBuilderCache) {
+        $Candidates += Get-ChildItem -LiteralPath $ElectronBuilderCache -Recurse -Filter makensis.exe -File -ErrorAction SilentlyContinue |
+            Sort-Object Length -Descending |
+            Select-Object -ExpandProperty FullName
+    }
+    foreach ($Candidate in $Candidates) {
+        if ($Candidate -and (Test-Path -LiteralPath $Candidate)) {
+            return (Resolve-Path -LiteralPath $Candidate).Path
+        }
+    }
+    throw "NSIS is missing. Install it with: winget install --id NSIS.NSIS --exact"
 }
 
 if (-not (Test-Path -LiteralPath $PythonExe)) {
@@ -117,19 +146,108 @@ try {
 
     [xml]$ProjectXml = Get-Content -LiteralPath $ProjectPath -Raw
     $Version = [string]$ProjectXml.Project.PropertyGroup.Version
-    $PortableZip = Join-Path $DistRoot "SpatialScope-Windows-x64-Portable-$Version.zip"
-    Compress-Archive -Path (Join-Path $PublishRoot "*") -DestinationPath $PortableZip -CompressionLevel Optimal -Force
-    $Hash = (Get-FileHash -LiteralPath $PortableZip -Algorithm SHA256).Hash.ToLowerInvariant()
+    $MakeNsis = Resolve-MakeNsis
+    Assert-ChildPath $DistRoot $NativeRoot
+    Get-ChildItem -LiteralPath $DistRoot -Filter "SpatialScope-Windows-x64-Portable-*.zip" -File -ErrorAction SilentlyContinue |
+        Remove-Item -Force
+    $SetupExe = Join-Path $DistRoot "SpatialScope-Windows-x64-Setup.exe"
+    Remove-Item -LiteralPath $SetupExe -Force -ErrorAction SilentlyContinue
+    & $MakeNsis `
+        "/DAPP_VERSION=$Version" `
+        "/DSOURCE_DIR=$PublishRoot" `
+        "/DOUTPUT_DIR=$DistRoot" `
+        "/DICON_PATH=$(Join-Path $WindowsRoot 'desktop\assets\SpatialScope.ico')" `
+        $InstallerScript
+    Assert-Success "NSIS installer build"
+    if (-not (Test-Path -LiteralPath $SetupExe)) {
+        throw "NSIS did not produce $SetupExe"
+    }
+
+    Assert-ChildPath $InstallerSmokeRoot $BuildRoot
+    Remove-Item -LiteralPath $InstallerSmokeRoot -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force $InstallerSmokeRoot | Out-Null
+
+    # Prove that a user-selected non-empty directory without the installer
+    # ownership marker is rejected without changing its contents.
+    $ProtectedRoot = Join-Path $InstallerSmokeRoot "protected"
+    $ProtectedEngine = Join-Path $ProtectedRoot "engine"
+    $ProtectedSentinel = Join-Path $ProtectedEngine "keep.txt"
+    New-Item -ItemType Directory -Force $ProtectedEngine | Out-Null
+    [System.IO.File]::WriteAllText($ProtectedSentinel, "user-owned sentinel", [System.Text.Encoding]::UTF8)
+    $ProtectedInstallerProcess = Start-Process `
+        -FilePath $SetupExe `
+        -ArgumentList @("/S", "/SMOKETEST", "/D=$ProtectedRoot") `
+        -WindowStyle Hidden `
+        -Wait `
+        -PassThru
+    if ($ProtectedInstallerProcess.ExitCode -eq 0) {
+        throw "The installer accepted a non-empty directory without a SpatialScope ownership marker."
+    }
+    if (-not (Test-Path -LiteralPath $ProtectedSentinel) -or
+        (Get-Content -LiteralPath $ProtectedSentinel -Raw) -ne "user-owned sentinel") {
+        throw "The installer modified a protected user-owned directory."
+    }
+    if ((Test-Path -LiteralPath (Join-Path $ProtectedRoot ".spatialscope-install")) -or
+        (Test-Path -LiteralPath (Join-Path $ProtectedRoot "SpatialScope.exe"))) {
+        throw "The rejected installer run left SpatialScope files in the protected directory."
+    }
+
+    $InstalledRoot = Join-Path $InstallerSmokeRoot "installed"
+    $InstallerProcess = Start-Process `
+        -FilePath $SetupExe `
+        -ArgumentList @("/S", "/SMOKETEST", "/D=$InstalledRoot") `
+        -WindowStyle Hidden `
+        -Wait `
+        -PassThru
+    if ($InstallerProcess.ExitCode -ne 0) {
+        throw "silent installer smoke test failed with exit code $($InstallerProcess.ExitCode)"
+    }
+    $InstalledApp = Join-Path $InstalledRoot "SpatialScope.exe"
+    $InstalledEngine = Join-Path $InstalledRoot "engine\SpatialScopeEngine.exe"
+    $InstallMarker = Join-Path $InstalledRoot ".spatialscope-install"
+    $SmokeMarker = Join-Path $InstalledRoot ".spatialscope-smoke"
+    if (-not (Test-Path -LiteralPath $InstalledApp) -or
+        -not (Test-Path -LiteralPath $InstalledEngine) -or
+        -not (Test-Path -LiteralPath $InstallMarker) -or
+        -not (Test-Path -LiteralPath $SmokeMarker)) {
+        throw "The installer smoke test did not install the app, engine, and safety markers."
+    }
+    $CapturePath = Join-Path $InstallerSmokeRoot "installed-app.png"
+    $PreviousCapturePath = $env:SPATIALSCOPE_CAPTURE_PATH
+    $PreviousCaptureExit = $env:SPATIALSCOPE_CAPTURE_EXIT
+    try {
+        $env:SPATIALSCOPE_CAPTURE_PATH = $CapturePath
+        $env:SPATIALSCOPE_CAPTURE_EXIT = "1"
+        $InstalledProcess = Start-Process -FilePath $InstalledApp -WindowStyle Hidden -PassThru
+        if (-not $InstalledProcess.WaitForExit(30000)) {
+            Stop-Process -Id $InstalledProcess.Id -Force -ErrorAction SilentlyContinue
+            throw "The installed SpatialScope app did not finish its launch smoke test."
+        }
+    }
+    finally {
+        $env:SPATIALSCOPE_CAPTURE_PATH = $PreviousCapturePath
+        $env:SPATIALSCOPE_CAPTURE_EXIT = $PreviousCaptureExit
+    }
+    if (-not (Test-Path -LiteralPath $CapturePath)) {
+        throw "The installed SpatialScope app did not render its launch capture."
+    }
+    $Uninstaller = Join-Path $InstalledRoot "Uninstall SpatialScope.exe"
+    $UninstallProcess = Start-Process -FilePath $Uninstaller -ArgumentList "/S" -WindowStyle Hidden -Wait -PassThru
+    if ($UninstallProcess.ExitCode -ne 0 -or (Test-Path -LiteralPath $InstalledApp)) {
+        throw "silent uninstaller smoke test failed."
+    }
+
+    $Hash = (Get-FileHash -LiteralPath $SetupExe -Algorithm SHA256).Hash.ToLowerInvariant()
     $HashPath = Join-Path $DistRoot "SHA256SUMS-Windows.txt"
     [System.IO.File]::WriteAllText(
         $HashPath,
-        "$Hash  $(Split-Path -Leaf $PortableZip)`n",
+        "$Hash  $(Split-Path -Leaf $SetupExe)`n",
         [System.Text.Encoding]::ASCII
     )
 
     Write-Host "Native SpatialScope $Version is ready."
     Write-Host "Run: $(Join-Path $PublishRoot 'SpatialScope.exe')"
-    Write-Host "Portable: $PortableZip"
+    Write-Host "Installer: $SetupExe"
 }
 finally {
     Pop-Location

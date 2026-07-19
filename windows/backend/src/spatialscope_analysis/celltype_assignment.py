@@ -987,7 +987,12 @@ def _run_celltype_assignment_impl(
         )
         return label_id, ct, (slc, support)
 
-    with threadpool_limits(limits=target_threads):
+    # The per-label support pass already fans out across ``support_n_jobs``.
+    # Keep each job's native kernels single-threaded when several jobs run so
+    # the total worker budget stays at the machine's logical CPU count instead
+    # of multiplying into severe nested oversubscription.
+    support_native_threads = 1 if support_n_jobs > 1 else target_threads
+    with threadpool_limits(limits=support_native_threads):
         results = Parallel(n_jobs=support_n_jobs, prefer="threads", batch_size=64)(
             delayed(support_for_label)(label_id) for label_id in range(1, n_labels + 1)
         )
@@ -2175,32 +2180,38 @@ def _evaluate_explicit_celltype_assignment_combo_records(
 
     if parallel_workers > 1 and Parallel is not None and delayed is not None:
         chunk_size = max(1, min(48, math.ceil(len(combo_records) / max(1, parallel_workers * 4))))
-        chunk_results = Parallel(
-            n_jobs=parallel_workers,
-            backend=safe_backend,
-            max_nbytes="32M",
-            mmap_mode="r",
-            batch_size=1,
-            verbose=0,
-        )(
-            delayed(_evaluate_celltype_assignment_combo_chunk)(
-                combo_chunk,
-                folder=folder,
-                save_dir=save_dir,
-                pixel_size_um=pixel_size_um,
-                image_id=image_id,
-                channels_cfg=channels_cfg,
-                celltype_cfg=celltype_cfg,
-                labels=labels,
-                df_pixels=df_pixels,
-                shapes=shapes,
-                base_params=base_params,
-                native_threads=native_threads_per_worker,
-                support_workers=support_workers_per_worker,
-                screening_factor=screening_factor,
+        # threadpoolctl changes process-wide native-library limits. Keep one
+        # outer guard active for the complete threaded scan so sibling worker
+        # contexts cannot restore a larger limit while another combo is still
+        # running. Per-combo guards remain useful for process-based backends.
+        outer_native_limit = 1 if safe_backend == "threading" else max(1, int(native_threads_per_worker or 1))
+        with threadpool_limits(limits=outer_native_limit):
+            chunk_results = Parallel(
+                n_jobs=parallel_workers,
+                backend=safe_backend,
+                max_nbytes="32M",
+                mmap_mode="r",
+                batch_size=1,
+                verbose=0,
+            )(
+                delayed(_evaluate_celltype_assignment_combo_chunk)(
+                    combo_chunk,
+                    folder=folder,
+                    save_dir=save_dir,
+                    pixel_size_um=pixel_size_um,
+                    image_id=image_id,
+                    channels_cfg=channels_cfg,
+                    celltype_cfg=celltype_cfg,
+                    labels=labels,
+                    df_pixels=df_pixels,
+                    shapes=shapes,
+                    base_params=base_params,
+                    native_threads=native_threads_per_worker,
+                    support_workers=support_workers_per_worker,
+                    screening_factor=screening_factor,
+                )
+                for combo_chunk in _iter_assignment_combo_chunks(combo_records, chunk_size)
             )
-            for combo_chunk in _iter_assignment_combo_chunks(combo_records, chunk_size)
-        )
         return [row for chunk in chunk_results for row in chunk]
 
     return _evaluate_celltype_assignment_combo_chunk(
@@ -3217,6 +3228,19 @@ def run_celltype_assignment_parameter_optimizer(
                     "expansion_search_strategy": "evolutionary_genetic_successive_halving",
                     "objective": "minimize_unresolved_total_then_ambiguous_then_unassigned",
                 },
+                "parallel_config": {
+                    "parallel_workers": int(parallel_workers),
+                    "parallel_backend": str(parallel_backend),
+                    "native_threads_per_worker": None
+                    if native_threads_per_worker is None
+                    else int(native_threads_per_worker),
+                    "support_workers_per_worker": None
+                    if support_workers_per_worker is None
+                    else int(support_workers_per_worker),
+                    "joblib_available": bool(Parallel is not None and delayed is not None),
+                    "threadpoolctl_available": bool(threadpool_limits is not None),
+                    "cpu_count": int(os.cpu_count() or 1),
+                },
             },
         )
         fig.savefig(svg_path, dpi=300, bbox_inches="tight")
@@ -3248,6 +3272,19 @@ def run_celltype_assignment_parameter_optimizer(
         "count_columns": count_columns,
         "search_space": search_space_specs,
         "priority_search_space": priority_space_specs,
+        "parallel_config": {
+            "parallel_workers": int(parallel_workers),
+            "parallel_backend": str(parallel_backend),
+            "native_threads_per_worker": None
+            if native_threads_per_worker is None
+            else int(native_threads_per_worker),
+            "support_workers_per_worker": None
+            if support_workers_per_worker is None
+            else int(support_workers_per_worker),
+            "joblib_available": bool(Parallel is not None and delayed is not None),
+            "threadpoolctl_available": bool(threadpool_limits is not None),
+            "cpu_count": int(os.cpu_count() or 1),
+        },
         "saved_paths": {
             "csv": results_csv_path,
             "json": json_path,

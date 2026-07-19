@@ -34,6 +34,10 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis --no-progress -y
+
       - name: Prepare native scientific environment
         shell: pwsh
         run: ./windows/run_native.ps1 setup
@@ -42,12 +46,12 @@ jobs:
         shell: pwsh
         run: ./windows/build_native.ps1 -SkipDependencies -FullSmoke
 
-      - name: Upload native Windows portable package
+      - name: Upload native Windows installer
         uses: actions/upload-artifact@v4
         with:
           name: SpatialScope-Windows-x64
           path: |
-            windows/native/dist/SpatialScope-Windows-x64-Portable-*.zip
+            windows/native/dist/SpatialScope-Windows-x64-Setup.exe
             windows/native/dist/SHA256SUMS-Windows.txt
           if-no-files-found: error
           retention-days: 14

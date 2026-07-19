@@ -1,6 +1,6 @@
 # Release SpatialScope Through GitHub
 
-SpatialScope distributes ad-hoc-signed macOS builds and unsigned Windows x64 builds through GitHub Releases. The platforms release independently: macOS 1.2.1 uses Sparkle for updates, while Windows 2.0.0 is a native WPF application distributed as a manually updated portable ZIP. Apple Developer Program and commercial Windows code-signing memberships are not required. Users approve the app once through macOS Privacy & Security or Windows SmartScreen.
+SpatialScope distributes ad-hoc-signed macOS builds and unsigned Windows x64 builds through GitHub Releases. The platforms release independently: macOS 1.2.1 uses Sparkle for updates, while Windows 1.2.1 is a native WPF application distributed with a setup executable. Apple Developer Program and commercial Windows code-signing memberships are not required. Users approve the app once through macOS Privacy & Security or Windows SmartScreen.
 
 ## Platform versions and tags
 
@@ -9,10 +9,10 @@ SpatialScope distributes ad-hoc-signed macOS builds and unsigned Windows x64 bui
 - A Windows-only release must not change the Xcode version, macOS artifacts, or Sparkle appcast.
 - A Windows-only release must set GitHub's `make_latest` value to `false`, so the current macOS release remains the repository's Latest release.
 
-For Windows 2.0.0, use the tag `windows-v2.0.0`. Its stable download URL is:
+For Windows 1.2.1, use the tag `windows-v1.2.1`. Its stable download URL is:
 
 ```text
-https://github.com/fengshuoliu/SpatialScope/releases/download/windows-v2.0.0/SpatialScope-Windows-x64-Portable-2.0.0.zip
+https://github.com/fengshuoliu/SpatialScope/releases/download/windows-v1.2.1/SpatialScope-Windows-x64-Setup.exe
 ```
 
 The macOS download URL continues to use GitHub's Latest release:
@@ -44,7 +44,7 @@ https://github.com/fengshuoliu/SpatialScope/releases/latest/download/SpatialScop
    Windows:
 
    ```text
-   SpatialScope-Windows-x64-Portable-<version>.zip
+   SpatialScope-Windows-x64-Setup.exe
    SHA256SUMS-Windows.txt
    ```
 
@@ -81,12 +81,12 @@ https://github.com/fengshuoliu/SpatialScope/releases/latest/download/SpatialScop
 5. Confirm that the build succeeds and produces:
 
    ```text
-   windows/native/dist/SpatialScope-Windows-x64-Portable-<version>.zip
+   windows/native/dist/SpatialScope-Windows-x64-Setup.exe
    windows/native/dist/SHA256SUMS-Windows.txt
    ```
 
-6. Extract the ZIP into a new folder and run `SpatialScope.exe`. Verify native input/output folder selection, Step 2 SVG and PNG generation, one representative complete workflow, exported files, and reopening the output folder.
-7. Push the release branch and wait for the Windows workflow to pass. Download the `SpatialScope-Windows-x64` workflow artifact and confirm that it contains only the portable ZIP and Windows checksum file. The workflow runs the frozen renderer, Step 2, and the complete synthetic nine-stage analysis before packaging.
+6. Run the setup program, launch SpatialScope from its installed shortcut, and verify native input/output folder selection, Step 2 SVG and PNG generation, one representative complete workflow, exported files, reopening the output folder, and uninstalling from Windows Settings.
+7. Push the release branch and wait for the Windows workflow to pass. Download the `SpatialScope-Windows-x64` workflow artifact and confirm that it contains only the setup executable and Windows checksum file. The workflow runs the frozen renderer, Step 2, and the complete synthetic nine-stage analysis before packaging.
 
 ## Generate the Sparkle feed for macOS
 
@@ -137,17 +137,17 @@ Inspect `docs/appcast.xml` before publishing. It must contain the new version, b
 
 1. Commit and push the Windows version, changelog, source changes, and release documentation.
 2. Create the tag `windows-v<version>` from the tested commit.
-3. Create a normal GitHub release named `SpatialScope <version> for Windows`. Upload the portable ZIP and `SHA256SUMS-Windows.txt`.
+3. Create a normal GitHub release named `SpatialScope <version> for Windows`. Upload `SpatialScope-Windows-x64-Setup.exe` and `SHA256SUMS-Windows.txt`.
 4. Set the GitHub Releases API field `make_latest` to `false` when creating or publishing the release. Do not mark the release as a prerelease solely to preserve the macOS Latest designation.
-5. Publish the Windows release and verify the pinned ZIP URL, archive extraction, checksum, and launch on Windows 10 or 11.
+5. Publish the Windows release and verify the pinned setup URL, installer launch, checksum, installation, application launch, and uninstall on Windows 10 or 11.
 6. Confirm that `https://github.com/fengshuoliu/SpatialScope/releases/latest` still resolves to the current macOS release and that the macOS DMG latest-download URL still works.
 7. Do not regenerate or commit `docs/appcast.xml` for this Windows-only release.
 8. Update public Windows download links to the pinned `windows-v<version>` URL. Do not use `/releases/latest/download/` for a platform-specific Windows asset.
 
-For the initial native Windows release, add a notice to the macOS 1.2.1 release notes stating that the Windows 1.2.0 NSIS and portable EXE assets are retired and linking to `windows-v2.0.0`. Preserve the macOS 1.2.1 tag and artifacts.
+Keep the existing macOS release notes, `v1.2.1` tag, assets, Xcode version, and Sparkle appcast unchanged when publishing Windows 1.2.1.
 
 ## Rollback
 
 For a defective macOS release, remove its item from `docs/appcast.xml` and push that change immediately so Sparkle stops offering it. Keep the GitHub release available long enough for investigation unless it presents a security or data-loss risk. Publish a corrected release with a higher build number; never reuse a build number that users may already have installed.
 
-For a defective Windows release, remove its public download links, mark the release as a prerelease or draft while investigating when appropriate, and publish a corrected `windows-v<version>` release. Never replace a previously downloaded ZIP with different bytes under the same filename and tag.
+For a defective Windows release, remove its public download links, mark the release as a prerelease or draft while investigating when appropriate, and publish a corrected `windows-v<version>` release. Never replace a previously downloaded installer with different bytes under the same filename and tag.
