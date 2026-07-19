@@ -1,16 +1,19 @@
 using Microsoft.Win32;
 using SpatialScope.Windows.Models;
 using SpatialScope.Windows.Services;
+using System.ComponentModel;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
@@ -19,6 +22,17 @@ namespace SpatialScope.Windows;
 
 public partial class MainWindow : Window
 {
+    private sealed class Win32DialogOwner(nint handle) : System.Windows.Forms.IWin32Window
+    {
+        public nint Handle { get; } = handle;
+    }
+
+    private enum ParameterRunMode
+    {
+        Manual,
+        Advanced,
+    }
+
     private static readonly string[] ChannelPalette =
     [
         "#FFFFFF", "#EF476F", "#06D6A0", "#118AB2", "#FFD166", "#8E6CEF",
@@ -51,6 +65,14 @@ public partial class MainWindow : Window
     private double _yPixels = 1000;
     private double _nucleiOptimizerBudget = 64;
     private double _assignmentOptimizerBudget = 64;
+    private ParameterRunMode _nucleiRunMode = ParameterRunMode.Manual;
+    private ParameterRunMode _assignmentRunMode = ParameterRunMode.Manual;
+    private JsonElement? _pendingNucleiRecommendation;
+    private JsonElement? _pendingAssignmentRecommendation;
+    private bool _closeInProgress;
+    private bool _engineShutdownComplete;
+    private int _outputRestoreGeneration;
+    private int _cellTypesTabIndex;
     private bool _suppressLanguageSelection;
     private bool _isBusy;
     private string? _activeSectionKey;
@@ -85,7 +107,7 @@ public partial class MainWindow : Window
         _cpuMonitor.Start();
 
         Loaded += MainWindow_Loaded;
-        Closed += MainWindow_Closed;
+        Closing += MainWindow_Closing;
     }
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
@@ -95,6 +117,7 @@ public partial class MainWindow : Window
         {
             await _engine.StartAsync();
             SetLocalizedStatus("EngineReady");
+            UpdateCpuText();
             await CaptureQaScenarioIfRequestedAsync();
         }
         catch (Exception exception)
@@ -105,10 +128,24 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void MainWindow_Closed(object? sender, EventArgs e)
+    private async void MainWindow_Closing(object? sender, CancelEventArgs e)
     {
+        if (_engineShutdownComplete) return;
+
+        e.Cancel = true;
+        if (_closeInProgress) return;
+        _closeInProgress = true;
+
         _cpuMonitor.Dispose();
-        await _engine.DisposeAsync();
+        try
+        {
+            await _engine.DisposeAsync();
+        }
+        finally
+        {
+            _engineShutdownComplete = true;
+            Close();
+        }
     }
 
     private async Task CaptureQaScenarioIfRequestedAsync()
@@ -283,7 +320,13 @@ public partial class MainWindow : Window
             : _localization["NotSet"];
     }
 
-    private void UpdateCpuText() => CpuValue.Text = $"{_cpuMonitor.CpuPercent:0.0}% {_localization["AppCpu"]}";
+    private void UpdateCpuText()
+    {
+        var gpuText = !string.IsNullOrWhiteSpace(_engine.AnalysisGpuBackend)
+            ? $"{_engine.DetectedGpus.Count} {_localization["Gpus"]}"
+            : _localization["CpuAnalysis"];
+        CpuValue.Text = $"{_engine.DefaultCpuWorkers} {_localization["Cpus"]} · {gpuText} · {_cpuMonitor.CpuPercent:0.0}%";
+    }
 
     private UIElement BuildSectionView(string key) => key switch
     {
@@ -331,6 +374,76 @@ public partial class MainWindow : Window
         return button;
     }
 
+    private UIElement CreateModeSelector(
+        string groupName,
+        string manualAutomationId,
+        string advancedAutomationId,
+        ParameterRunMode selectedMode,
+        string manualHelp,
+        string advancedHelp,
+        Action<ParameterRunMode> selectionChanged)
+    {
+        var description = new TextBlock
+        {
+            Text = selectedMode == ParameterRunMode.Manual ? manualHelp : advancedHelp,
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = (Brush)FindResource("SecondaryTextBrush"),
+            Margin = new Thickness(0, 10, 0, 0),
+            LineHeight = 19,
+        };
+        AutomationProperties.SetLiveSetting(description, AutomationLiveSetting.Polite);
+
+        var manual = new RadioButton
+        {
+            Content = _localization["ManualMode"],
+            GroupName = groupName,
+            IsChecked = selectedMode == ParameterRunMode.Manual,
+            Style = (Style)FindResource("SegmentedModeButtonStyle"),
+        };
+        AutomationProperties.SetAutomationId(manual, manualAutomationId);
+        AutomationProperties.SetName(manual, _localization["ManualMode"]);
+        AutomationProperties.SetHelpText(manual, manualHelp);
+
+        var advanced = new RadioButton
+        {
+            Content = _localization["AdvancedScreening"],
+            GroupName = groupName,
+            IsChecked = selectedMode == ParameterRunMode.Advanced,
+            Style = (Style)FindResource("SegmentedModeButtonStyle"),
+        };
+        AutomationProperties.SetAutomationId(advanced, advancedAutomationId);
+        AutomationProperties.SetName(advanced, _localization["AdvancedScreening"]);
+        AutomationProperties.SetHelpText(advanced, advancedHelp);
+
+        void ApplyMode(ParameterRunMode mode)
+        {
+            description.Text = mode == ParameterRunMode.Manual ? manualHelp : advancedHelp;
+            selectionChanged(mode);
+        }
+
+        manual.Checked += (_, _) => ApplyMode(ParameterRunMode.Manual);
+        advanced.Checked += (_, _) => ApplyMode(ParameterRunMode.Advanced);
+
+        var choices = new UniformGrid { Rows = 1, Columns = 2, Width = 420 };
+        choices.Children.Add(manual);
+        choices.Children.Add(advanced);
+        var selectorHost = new Border
+        {
+            Background = new SolidColorBrush(Color.FromRgb(244, 248, 249)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(205, 219, 222)),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(2),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Child = choices,
+        };
+
+        var stack = new StackPanel();
+        stack.Children.Add(selectorHost);
+        stack.Children.Add(description);
+        return stack;
+    }
+
     private UIElement BuildInputsView()
     {
         var locations = new Grid();
@@ -344,26 +457,37 @@ public partial class MainWindow : Window
         AddFolderRow(locations, 1, _localization["OutputFolder"], _outputFolder, ChooseOutputFolder);
 
         var calibrationGrid = new UniformGrid { Columns = 4 };
-        calibrationGrid.Children.Add(CreateNumberField(_localization["MicrometersWide"], _xMicrometers, value => _xMicrometers = value, "µm"));
-        calibrationGrid.Children.Add(CreateNumberField(_localization["MicrometersHigh"], _yMicrometers, value => _yMicrometers = value, "µm"));
-        calibrationGrid.Children.Add(CreateNumberField(_localization["PixelWidth"], _xPixels, value => _xPixels = value, "px"));
-        calibrationGrid.Children.Add(CreateNumberField(_localization["PixelHeight"], _yPixels, value => _yPixels = value, "px"));
+        calibrationGrid.Children.Add(CreateNumberField(_localization["MicrometersWide"], _xMicrometers, value => _xMicrometers = value, "µm", "inputs"));
+        calibrationGrid.Children.Add(CreateNumberField(_localization["MicrometersHigh"], _yMicrometers, value => _yMicrometers = value, "µm", "inputs"));
+        calibrationGrid.Children.Add(CreateNumberField(_localization["PixelWidth"], _xPixels, value => _xPixels = value, "px", "inputs"));
+        calibrationGrid.Children.Add(CreateNumberField(_localization["PixelHeight"], _yPixels, value => _yPixels = value, "px", "inputs"));
 
         var tools = new WrapPanel { Margin = new Thickness(0, 0, 0, 12) };
         tools.Children.Add(CreateButton(_localization["RescanCsv"], async (_, _) => await SaveConfigurationAsync()));
         tools.Children.Add(CreateButton(_localization["ResetMarkerNames"], (_, _) =>
         {
             foreach (var channel in _channels) channel.Marker = Path.GetFileNameWithoutExtension(channel.FileName);
+            _pendingNucleiRecommendation = null;
+            _pendingAssignmentRecommendation = null;
             InvalidateAfter("inputs");
         }));
         tools.Children.Add(CreateButton(_localization["ReassignColors"], (_, _) =>
         {
             for (var index = 0; index < _channels.Count; index++) _channels[index].ColorHex = ChannelPalette[index % ChannelPalette.Length];
+            _pendingNucleiRecommendation = null;
+            _pendingAssignmentRecommendation = null;
             InvalidateAfter("inputs");
         }));
         tools.Children.Add(CreateButton(_localization["SaveConfiguration"], async (_, _) => await SaveConfigurationAsync(), primary: true));
 
         var channelGrid = new DataGrid { ItemsSource = _channels, MinHeight = 245 };
+        channelGrid.CellEditEnding += (_, eventArgs) =>
+        {
+            if (eventArgs.EditAction != DataGridEditAction.Commit) return;
+            _pendingNucleiRecommendation = null;
+            _pendingAssignmentRecommendation = null;
+            InvalidateAfter("inputs");
+        };
         channelGrid.Columns.Add(new DataGridCheckBoxColumn { Header = _localization["Overlay"], Binding = new Binding(nameof(ChannelRow.IncludeInOverlay)), Width = 80 });
         channelGrid.Columns.Add(new DataGridTextColumn { Header = _localization["CsvFile"], Binding = new Binding(nameof(ChannelRow.FileName)), IsReadOnly = true, Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
         channelGrid.Columns.Add(new DataGridTextColumn { Header = _localization["Marker"], Binding = new Binding(nameof(ChannelRow.Marker)) { UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged }, Width = 220 });
@@ -371,7 +495,7 @@ public partial class MainWindow : Window
         {
             Header = _localization["Color"],
             CellTemplate = (DataTemplate)FindResource("ColorEditorTemplate"),
-            Width = 160,
+            Width = 86,
         });
 
         var registry = new StackPanel();
@@ -381,6 +505,85 @@ public partial class MainWindow : Window
             CreateCard(_localization["DataLocations"], locations),
             CreateCard(_localization["SpatialCalibration"], calibrationGrid),
             CreateCard(_localization["ChannelRegistry"], registry));
+    }
+
+    private void ColorSwatch_Loaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button button) UpdateColorSwatchAutomation(button);
+    }
+
+    private void ColorSwatch_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button button) return;
+        var currentHex = button.DataContext switch
+        {
+            ChannelRow channel => channel.ColorHex,
+            CellTypeRow cellType => cellType.ColorHex,
+            _ => null,
+        };
+        var current = Colors.White;
+        if (!string.IsNullOrWhiteSpace(currentHex))
+        {
+            try
+            {
+                if (ColorConverter.ConvertFromString(currentHex) is Color parsedColor) current = parsedColor;
+            }
+            catch (FormatException)
+            {
+                // Corrupt legacy color values must never crash the picker.
+            }
+        }
+        using var dialog = new System.Windows.Forms.ColorDialog
+        {
+            AllowFullOpen = true,
+            AnyColor = true,
+            FullOpen = true,
+            SolidColorOnly = true,
+            Color = System.Drawing.Color.FromArgb(current.A, current.R, current.G, current.B),
+        };
+        var owner = new Win32DialogOwner(new WindowInteropHelper(this).Handle);
+        if (dialog.ShowDialog(owner) != System.Windows.Forms.DialogResult.OK)
+        {
+            button.Focus();
+            return;
+        }
+
+        var selectedHex = $"#{dialog.Color.R:X2}{dialog.Color.G:X2}{dialog.Color.B:X2}";
+        if (!string.Equals(currentHex, selectedHex, StringComparison.OrdinalIgnoreCase))
+        {
+            switch (button.DataContext)
+            {
+                case ChannelRow channel:
+                    channel.ColorHex = selectedHex;
+                    _pendingNucleiRecommendation = null;
+                    _pendingAssignmentRecommendation = null;
+                    InvalidateAfter("inputs");
+                    break;
+                case CellTypeRow cellType:
+                    cellType.ColorHex = selectedHex;
+                    _pendingAssignmentRecommendation = null;
+                    InvalidateAfter("cellTypes");
+                    break;
+            }
+        }
+        UpdateColorSwatchAutomation(button);
+        button.Focus();
+    }
+
+    private void UpdateColorSwatchAutomation(Button button)
+    {
+        var (name, color) = button.DataContext switch
+        {
+            ChannelRow channel => (channel.Marker, channel.ColorHex),
+            CellTypeRow cellType => (cellType.Name, cellType.ColorHex),
+            _ => (string.Empty, string.Empty),
+        };
+        var label = string.IsNullOrWhiteSpace(name)
+            ? _localization["ChooseColor"]
+            : $"{_localization["ChooseColor"]}: {name}";
+        AutomationProperties.SetName(button, label);
+        AutomationProperties.SetHelpText(button, $"{label}. {color}");
+        button.ToolTip = label;
     }
 
     private void AddFolderRow(Grid grid, int row, string label, string path, Action choose)
@@ -410,24 +613,36 @@ public partial class MainWindow : Window
         grid.Children.Add(chooseButton);
     }
 
-    private UIElement CreateNumberField(string label, double value, Action<double> setter, string unit)
+    private UIElement CreateNumberField(
+        string label,
+        double value,
+        Action<double> setter,
+        string unit,
+        string? invalidationSectionKey = null,
+        Func<double, double>? normalize = null)
     {
+        var committedValue = normalize?.Invoke(value) ?? value;
         var panel = new StackPanel { Margin = new Thickness(0, 0, 14, 0) };
         panel.Children.Add(new TextBlock { Text = label, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 6) });
         var row = new DockPanel();
         var unitText = new TextBlock { Text = unit, Margin = new Thickness(7, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center, Foreground = (Brush)FindResource("SecondaryTextBrush") };
         DockPanel.SetDock(unitText, Dock.Right);
         row.Children.Add(unitText);
-        var editor = new TextBox { Text = value.ToString("0.###", CultureInfo.CurrentCulture) };
+        var editor = new TextBox { Text = committedValue.ToString("0.###", CultureInfo.CurrentCulture) };
         editor.LostFocus += (_, _) =>
         {
             if (TryReadDouble(editor.Text, out var parsed) && parsed > 0)
             {
-                setter(parsed);
+                var normalized = normalize?.Invoke(parsed) ?? parsed;
+                editor.Text = normalized.ToString("0.###", CultureInfo.CurrentCulture);
+                if (AreClose(normalized, committedValue)) return;
+
+                committedValue = normalized;
+                setter(normalized);
                 UpdateProgressMetadata();
-                InvalidateAfter("inputs");
+                if (invalidationSectionKey is not null) InvalidateAfter(invalidationSectionKey);
             }
-            else editor.Text = value.ToString("0.###", CultureInfo.CurrentCulture);
+            else editor.Text = committedValue.ToString("0.###", CultureInfo.CurrentCulture);
         };
         row.Children.Add(editor);
         panel.Children.Add(row);
@@ -439,17 +654,25 @@ public partial class MainWindow : Window
         var selected = ChooseFolder(_inputFolder);
         if (selected is null) return;
         _inputFolder = selected;
+        _pendingNucleiRecommendation = null;
+        _pendingAssignmentRecommendation = null;
         InvalidateAfter("inputs");
         DetailHost.Content = BuildInputsView();
     }
 
-    private void ChooseOutputFolder()
+    private async void ChooseOutputFolder()
     {
         var selected = ChooseFolder(_outputFolder);
         if (selected is null) return;
+        var restoreGeneration = ++_outputRestoreGeneration;
         _outputFolder = selected;
+        var restoreResult = await TryRestoreExistingResultsAsync(selected, restoreGeneration);
+        if (restoreGeneration != _outputRestoreGeneration || !PathsEqual(_outputFolder, selected)) return;
+        if (restoreResult == true) return;
+        ResetLoadedResults();
         InvalidateAfter("inputs");
         DetailHost.Content = BuildInputsView();
+        if (restoreResult == false) SetLocalizedStatus("NoExistingResults");
     }
 
     private string? ChooseFolder(string initialPath)
@@ -459,6 +682,217 @@ public partial class MainWindow : Window
         return dialog.ShowDialog(this) == true ? dialog.FolderName : null;
     }
 
+    private async Task<bool?> TryRestoreExistingResultsAsync(string selectedFolder, int restoreGeneration)
+    {
+        if (string.IsNullOrWhiteSpace(selectedFolder)) return false;
+        SetLocalizedStatus("CheckingExistingResults");
+        try
+        {
+            var response = await _engine.SendAsync("restore", new { outputFolder = selectedFolder });
+            if (restoreGeneration != _outputRestoreGeneration || !PathsEqual(_outputFolder, selectedFolder)) return null;
+            if (!response.TryGetProperty("restored", out var restored) || !restored.GetBoolean()) return false;
+            ValidateRestoredHistory(response);
+            ApplyRestoredHistory(response, selectedFolder);
+            return true;
+        }
+        catch (Exception exception)
+        {
+            if (restoreGeneration != _outputRestoreGeneration) return null;
+            SetStatus($"{_localization["RestoreFailed"]}: {LocalizeEngineError(exception.Message)}", isError: true);
+            return null;
+        }
+    }
+
+    private static void ValidateRestoredHistory(JsonElement response)
+    {
+        var configuration = response.GetProperty("configuration");
+        if (configuration.ValueKind != JsonValueKind.Object
+            || configuration.GetProperty("channels").ValueKind != JsonValueKind.Array
+            || configuration.GetProperty("pixelSizeUm").ValueKind != JsonValueKind.Array
+            || response.GetProperty("workflow").ValueKind != JsonValueKind.Object)
+        {
+            throw new InvalidDataException("The saved SpatialScope history has an invalid structure.");
+        }
+        foreach (var channel in configuration.GetProperty("channels").EnumerateArray())
+        {
+            _ = channel.GetProperty("file").GetString();
+            _ = channel.GetProperty("channel").GetString();
+            _ = channel.GetProperty("colorHex").GetString();
+            _ = channel.GetProperty("includeOverlay").GetBoolean();
+        }
+    }
+
+    private void ApplyRestoredHistory(JsonElement response, string selectedFolder)
+    {
+        var configuration = response.GetProperty("configuration");
+        _inputFolder = configuration.GetProperty("inputFolder").GetString() ?? string.Empty;
+        // A result folder may have been copied or moved. The folder selected
+        // in the current dialog is always authoritative for future outputs.
+        _outputFolder = selectedFolder;
+        if (configuration.TryGetProperty("pixelSizeUm", out var pixelSize) && pixelSize.GetArrayLength() >= 2)
+        {
+            _xPixels = 1000;
+            _yPixels = 1000;
+            _xMicrometers = pixelSize[0].GetDouble() * _xPixels;
+            _yMicrometers = pixelSize[1].GetDouble() * _yPixels;
+        }
+
+        _channels.Clear();
+        foreach (var item in configuration.GetProperty("channels").EnumerateArray())
+        {
+            _channels.Add(new ChannelRow
+            {
+                FileName = item.GetProperty("file").GetString() ?? string.Empty,
+                Marker = item.GetProperty("channel").GetString() ?? string.Empty,
+                ColorHex = item.GetProperty("colorHex").GetString() ?? "#FFFFFF",
+                IncludeInOverlay = item.GetProperty("includeOverlay").GetBoolean(),
+            });
+        }
+
+        if (response.TryGetProperty("nucleiParameters", out var nucleiParameters)
+            && nucleiParameters.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var parameter in ParameterCatalog.Nuclei)
+            {
+                if (TryGetJsonNumber(nucleiParameters, parameter.Key, out var value)
+                    || TryGetJsonNumber(nucleiParameters, parameter.Key.ToUpperInvariant(), out value))
+                {
+                    _nucleiValues[parameter.Key] = value;
+                }
+            }
+            if (TryGetJsonString(nucleiParameters, "nucleus_channel", out var nucleusChannel)
+                || TryGetJsonString(nucleiParameters, "NUCLEUS_CHANNEL", out nucleusChannel))
+            {
+                _nucleusChannel = nucleusChannel;
+            }
+        }
+        if (string.IsNullOrWhiteSpace(_nucleusChannel))
+        {
+            _nucleusChannel = _channels.FirstOrDefault(channel => channel.Marker.Contains("DAPI", StringComparison.OrdinalIgnoreCase))?.Marker
+                ?? _channels.FirstOrDefault()?.Marker
+                ?? string.Empty;
+        }
+
+        if (response.TryGetProperty("assignmentParameters", out var assignmentParameters)
+            && assignmentParameters.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var parameter in ParameterCatalog.Assignment)
+            {
+                if (TryGetJsonNumber(assignmentParameters, parameter.Key, out var value))
+                    _assignmentValues[parameter.Key] = value;
+            }
+            if (TryGetJsonString(assignmentParameters, "thresh_mode", out var thresholdMode))
+                _thresholdMode = thresholdMode;
+            if (assignmentParameters.TryGetProperty("resolve_ambiguous", out var resolve)
+                && resolve.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                _resolveAmbiguous = resolve.GetBoolean();
+        }
+
+        _cellTypes.Clear();
+        if (response.TryGetProperty("cellTypes", out var cellTypes) && cellTypes.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in cellTypes.EnumerateArray())
+            {
+                _cellTypes.Add(new CellTypeRow
+                {
+                    Name = item.TryGetProperty("name", out var name) ? name.GetString() ?? string.Empty : string.Empty,
+                    ColorHex = item.TryGetProperty("color_hex", out var color) ? color.GetString() ?? "#FFFFFF" : "#FFFFFF",
+                    AllPositive = JoinJsonStrings(item, "all_pos"),
+                    AllNegative = JoinJsonStrings(item, "all_neg"),
+                    AnyPositiveGroups = JoinJsonGroups(item, "any_pos_groups"),
+                });
+            }
+        }
+        EnsureDefaultCellTypes();
+
+        _pendingNucleiRecommendation = response.TryGetProperty("nucleiRecommendation", out var nucleiRecommendation)
+            && nucleiRecommendation.ValueKind == JsonValueKind.Object
+            && nucleiRecommendation.EnumerateObject().Any()
+                ? nucleiRecommendation.Clone()
+                : null;
+        _pendingAssignmentRecommendation = response.TryGetProperty("assignmentRecommendation", out var assignmentRecommendation)
+            && assignmentRecommendation.ValueKind == JsonValueKind.Object
+            && assignmentRecommendation.EnumerateObject().Any()
+                ? assignmentRecommendation.Clone()
+                : null;
+
+        _previewPaths.Clear();
+        if (response.TryGetProperty("previewPaths", out var previewPaths))
+        {
+            foreach (var property in previewPaths.EnumerateObject())
+                if (property.Value.ValueKind == JsonValueKind.String) _previewPaths[property.Name] = property.Value.GetString() ?? string.Empty;
+        }
+        _exportPaths.Clear();
+        CaptureExportPaths(response);
+
+        _resolvedCellTypes.Clear();
+        if (response.TryGetProperty("resolvedCellTypes", out var resolvedCellTypes))
+            _resolvedCellTypes.AddRange(resolvedCellTypes.EnumerateArray().Select(item => item.GetString() ?? string.Empty).Where(item => item.Length > 0));
+        _boundaries.Clear();
+        if (response.TryGetProperty("boundaries", out var boundaries))
+        {
+            foreach (var item in boundaries.EnumerateArray())
+                _boundaries.Add((item.GetProperty("label").GetString() ?? string.Empty, item.GetProperty("path").GetString() ?? string.Empty));
+        }
+
+        _outputFiles.Clear();
+        if (response.TryGetProperty("files", out var files))
+        {
+            foreach (var file in files.EnumerateArray())
+            {
+                _outputFiles.Add(new OutputFileRow
+                {
+                    Name = file.GetProperty("name").GetString() ?? string.Empty,
+                    RelativePath = file.GetProperty("relative_path").GetString() ?? string.Empty,
+                    SizeBytes = file.GetProperty("size_bytes").GetInt64(),
+                });
+            }
+        }
+
+        var workflow = response.GetProperty("workflow");
+        var previousComplete = true;
+        foreach (var section in _sections)
+        {
+            var savedComplete = workflow.TryGetProperty(section.Key, out var completeValue) && completeValue.GetBoolean();
+            if (previousComplete && savedComplete)
+            {
+                section.Status = WorkflowStatus.Complete;
+            }
+            else if (previousComplete)
+            {
+                section.Status = WorkflowStatus.Ready;
+                previousComplete = false;
+            }
+            else
+            {
+                section.Status = WorkflowStatus.NotStarted;
+            }
+        }
+
+        UpdateProgressMetadata();
+        var lastComplete = _sections.LastOrDefault(section => section.Status == WorkflowStatus.Complete) ?? _sections[0];
+        SelectSection(lastComplete.Key);
+        if (response.TryGetProperty("warnings", out var warnings) && warnings.GetArrayLength() > 0)
+        {
+            SetStatus($"{_localization["ExistingResultsRestored"]} {warnings[0].GetString()}");
+        }
+        else
+        {
+            SetLocalizedStatus("ExistingResultsRestored");
+        }
+    }
+
+    private void ResetLoadedResults()
+    {
+        _previewPaths.Clear();
+        _exportPaths.Clear();
+        _outputFiles.Clear();
+        _resolvedCellTypes.Clear();
+        _boundaries.Clear();
+        _pendingNucleiRecommendation = null;
+        _pendingAssignmentRecommendation = null;
+    }
+
     private async Task SaveConfigurationAsync()
     {
         if (string.IsNullOrWhiteSpace(_inputFolder) || string.IsNullOrWhiteSpace(_outputFolder))
@@ -466,6 +900,8 @@ public partial class MainWindow : Window
             SetLocalizedStatus("SelectFoldersFirst", isError: true);
             return;
         }
+        ResetLoadedResults();
+        InvalidateAfter("inputs");
         var channels = _channels.Select(channel => new
         {
             file = channel.FileName,
@@ -544,22 +980,187 @@ public partial class MainWindow : Window
         panel.Children.Add(heading);
         if (!string.IsNullOrWhiteSpace(previewPath) && File.Exists(previewPath))
         {
+            var imageTransform = new MatrixTransform(Matrix.Identity);
             var image = new Image
             {
-                Source = LoadBoundedBitmap(previewPath, 1500),
+                Source = LoadBoundedBitmap(previewPath, 3000),
                 Stretch = Stretch.Uniform,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
+                RenderTransform = imageTransform,
+                RenderTransformOrigin = new Point(0, 0),
             };
-            panel.Children.Add(new Border
+            RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality);
+
+            var viewport = new Grid
             {
                 Height = 430,
+                Background = Brushes.Black,
+                ClipToBounds = true,
+                Focusable = true,
+                Cursor = Cursors.Arrow,
+            };
+            viewport.Children.Add(image);
+            var viewerFrame = new Border
+            {
                 Background = Brushes.Black,
                 BorderBrush = (Brush)FindResource("PanelBorderBrush"),
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(7),
                 Padding = new Thickness(6),
-                Child = image,
+                Child = viewport,
+            };
+            AutomationProperties.SetName(viewport, title);
+            AutomationProperties.SetAutomationId(viewport, $"PlotViewer_{Path.GetFileNameWithoutExtension(previewPath)}");
+            AutomationProperties.SetHelpText(viewport, _localization["PlotZoomHelp"]);
+
+            Point? dragOrigin = null;
+            Matrix dragMatrix = Matrix.Identity;
+            Matrix ClampView(Matrix value)
+            {
+                var zoom = value.M11;
+                if (zoom <= 1 || viewport.ActualWidth <= 0 || viewport.ActualHeight <= 0) return Matrix.Identity;
+                value.OffsetX = Math.Clamp(value.OffsetX, viewport.ActualWidth * (1 - zoom), 0);
+                value.OffsetY = Math.Clamp(value.OffsetY, viewport.ActualHeight * (1 - zoom), 0);
+                return value;
+            }
+            void SetView(Matrix value)
+            {
+                imageTransform.Matrix = ClampView(value);
+                viewport.Cursor = imageTransform.Matrix.M11 > 1 ? Cursors.Hand : Cursors.Arrow;
+            }
+            void ResetView()
+            {
+                imageTransform.Matrix = Matrix.Identity;
+                viewport.Cursor = Cursors.Arrow;
+            }
+            void ZoomAt(Point position, double factor)
+            {
+                var current = imageTransform.Matrix;
+                var oldScale = current.M11;
+                var newScale = Math.Clamp(oldScale * factor, 1, 8);
+                if (AreClose(oldScale, newScale)) return;
+                if (AreClose(newScale, 1))
+                {
+                    ResetView();
+                    return;
+                }
+                var applied = newScale / oldScale;
+                SetView(new Matrix(
+                    newScale,
+                    0,
+                    0,
+                    newScale,
+                    position.X - ((position.X - current.OffsetX) * applied),
+                    position.Y - ((position.Y - current.OffsetY) * applied)));
+            }
+            void PanBy(double x, double y)
+            {
+                var value = imageTransform.Matrix;
+                if (value.M11 <= 1) return;
+                value.OffsetX += x;
+                value.OffsetY += y;
+                SetView(value);
+            }
+            void EndDrag()
+            {
+                dragOrigin = null;
+                if (viewport.IsMouseCaptured) viewport.ReleaseMouseCapture();
+                viewport.Cursor = imageTransform.Matrix.M11 > 1 ? Cursors.Hand : Cursors.Arrow;
+            }
+
+            viewport.PreviewMouseWheel += (_, e) =>
+            {
+                var oldScale = imageTransform.Matrix.M11;
+                ZoomAt(e.GetPosition(viewport), e.Delta > 0 ? 1.18 : 1 / 1.18);
+                e.Handled = !AreClose(oldScale, imageTransform.Matrix.M11);
+            };
+            viewport.PreviewMouseLeftButtonDown += (_, e) =>
+            {
+                viewport.Focus();
+                if (e.ClickCount >= 2)
+                {
+                    ResetView();
+                    e.Handled = true;
+                    return;
+                }
+                if (imageTransform.Matrix.M11 <= 1) return;
+                dragOrigin = e.GetPosition(viewport);
+                dragMatrix = imageTransform.Matrix;
+                viewport.CaptureMouse();
+                viewport.Cursor = Cursors.SizeAll;
+                e.Handled = true;
+            };
+            viewport.PreviewMouseMove += (_, e) =>
+            {
+                if (dragOrigin is null || e.LeftButton != MouseButtonState.Pressed) return;
+                var current = e.GetPosition(viewport);
+                var value = dragMatrix;
+                value.OffsetX += current.X - dragOrigin.Value.X;
+                value.OffsetY += current.Y - dragOrigin.Value.Y;
+                imageTransform.Matrix = ClampView(value);
+                e.Handled = true;
+            };
+            viewport.PreviewMouseLeftButtonUp += (_, e) =>
+            {
+                if (dragOrigin is null) return;
+                EndDrag();
+                e.Handled = true;
+            };
+            viewport.LostMouseCapture += (_, _) => EndDrag();
+            viewport.SizeChanged += (_, _) => SetView(imageTransform.Matrix);
+            viewport.GotKeyboardFocus += (_, _) => viewerFrame.BorderBrush = SystemColors.HighlightBrush;
+            viewport.LostKeyboardFocus += (_, _) => viewerFrame.BorderBrush = (Brush)FindResource("PanelBorderBrush");
+            viewport.PreviewKeyDown += (_, e) =>
+            {
+                var center = new Point(viewport.ActualWidth / 2, viewport.ActualHeight / 2);
+                switch (e.Key)
+                {
+                    case Key.Add:
+                    case Key.OemPlus:
+                        ZoomAt(center, 1.18);
+                        e.Handled = true;
+                        break;
+                    case Key.Subtract:
+                    case Key.OemMinus:
+                        ZoomAt(center, 1 / 1.18);
+                        e.Handled = true;
+                        break;
+                    case Key.D0:
+                    case Key.NumPad0:
+                        ResetView();
+                        e.Handled = true;
+                        break;
+                    case Key.Left when imageTransform.Matrix.M11 > 1:
+                        PanBy(24, 0);
+                        e.Handled = true;
+                        break;
+                    case Key.Right when imageTransform.Matrix.M11 > 1:
+                        PanBy(-24, 0);
+                        e.Handled = true;
+                        break;
+                    case Key.Up when imageTransform.Matrix.M11 > 1:
+                        PanBy(0, 24);
+                        e.Handled = true;
+                        break;
+                    case Key.Down when imageTransform.Matrix.M11 > 1:
+                        PanBy(0, -24);
+                        e.Handled = true;
+                        break;
+                    case Key.Escape:
+                        EndDrag();
+                        e.Handled = true;
+                        break;
+                }
+            };
+
+            panel.Children.Add(viewerFrame);
+            panel.Children.Add(new TextBlock
+            {
+                Text = _localization["PlotZoomHelp"],
+                Foreground = (Brush)FindResource("SecondaryTextBrush"),
+                FontSize = 12.5,
+                Margin = new Thickness(0, 7, 0, 0),
             });
         }
         else
@@ -591,7 +1192,15 @@ public partial class MainWindow : Window
         channelRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(320) });
         channelRow.Children.Add(new TextBlock { Text = _localization["NucleusChannel"], FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center });
         var channelPicker = new ComboBox { ItemsSource = _channels.Select(item => item.Marker).ToArray(), SelectedItem = _nucleusChannel };
-        channelPicker.SelectionChanged += (_, _) => _nucleusChannel = channelPicker.SelectedItem?.ToString() ?? string.Empty;
+        channelPicker.SelectionChanged += (_, _) =>
+        {
+            var selected = channelPicker.SelectedItem?.ToString() ?? string.Empty;
+            if (string.Equals(selected, _nucleusChannel, StringComparison.Ordinal)) return;
+            _nucleusChannel = selected;
+            _pendingNucleiRecommendation = null;
+            _pendingAssignmentRecommendation = null;
+            InvalidateAfter("nuclei");
+        };
         Grid.SetColumn(channelPicker, 1);
         channelRow.Children.Add(channelPicker);
 
@@ -605,25 +1214,59 @@ public partial class MainWindow : Window
             Foreground = (Brush)FindResource("SecondaryTextBrush"),
             Margin = new Thickness(0, 0, 0, 10),
         });
-        optimizerStack.Children.Add(CreateNumberField(_localization["OptimizerBudget"], _nucleiOptimizerBudget, value => _nucleiOptimizerBudget = Math.Clamp(Math.Round(value), 1, 4096), ""));
+        optimizerStack.Children.Add(CreateNumberField(
+            _localization["OptimizerBudget"],
+            _nucleiOptimizerBudget,
+            value => _nucleiOptimizerBudget = value,
+            "",
+            normalize: value => Math.Clamp(Math.Round(value), 1, 4096)));
         var optimizerButton = CreateButton(_localization["RunOptimizer"], async (_, _) =>
         {
             var result = await RunWorkflowAsync("nuclei", "nuclei_optimizer", new
             {
                 parameters = BuildNucleiPayload(),
                 maxEvaluations = (int)_nucleiOptimizerBudget,
-                parallelWorkers = Math.Max(1, Math.Min(4, Environment.ProcessorCount / 2)),
+                parallelWorkers = Math.Max(1, Environment.ProcessorCount),
                 parallelBackend = "threading",
                 useFixedRoiSubset = true,
             }, completesSection: false);
             if (result is null) return;
-            ApplyNucleiRecommendation(result.Value);
+            _pendingNucleiRecommendation = ExtractRecommendation(result.Value);
             _previewPaths["nucleiOptimizer"] = result.Value.TryGetProperty("previewPath", out var preview) && preview.ValueKind == JsonValueKind.String ? preview.GetString() ?? string.Empty : string.Empty;
             CaptureExportPaths(result.Value);
             DetailHost.Content = BuildNucleiView();
         }, primary: true);
         optimizerButton.Margin = new Thickness(0, 12, 0, 0);
         optimizerStack.Children.Add(optimizerButton);
+        if (_pendingNucleiRecommendation is JsonElement nucleiRecommendation)
+        {
+            optimizerStack.Children.Add(new TextBlock
+            {
+                Text = _localization["SuggestedComboReady"],
+                Foreground = (Brush)FindResource("SecondaryTextBrush"),
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 12, 0, 8),
+            });
+            var applySuggestion = CreateButton(_localization["ApplySuggestedCombo"], async (_, _) =>
+            {
+                var appliedParameters = _nucleiValues.ToDictionary(
+                    item => item.Key,
+                    item => (object?)item.Value);
+                appliedParameters["nucleus_channel"] = _nucleusChannel;
+                foreach (var property in nucleiRecommendation.EnumerateObject())
+                {
+                    if (property.Value.ValueKind == JsonValueKind.Number)
+                        appliedParameters[property.Name] = property.Value.GetDouble();
+                }
+                if (!await PersistAppliedRecommendationAsync("nuclei", appliedParameters)) return;
+                ApplyNucleiRecommendation(nucleiRecommendation);
+                _pendingNucleiRecommendation = null;
+                SetLocalizedStatus("SuggestedComboApplied");
+                DetailHost.Content = BuildNucleiView();
+            }, primary: true);
+            AutomationProperties.SetAutomationId(applySuggestion, "ApplyNucleiSuggestedCombo");
+            optimizerStack.Children.Add(applySuggestion);
+        }
         if (_previewPaths.TryGetValue("nucleiOptimizer", out var optimizerPreview))
         {
             var previewPanel = CreateImagePanel(_localization["AdvancedScreening"], optimizerPreview);
@@ -636,7 +1279,7 @@ public partial class MainWindow : Window
             var result = await RunWorkflowAsync("nuclei", "nuclei", new
             {
                 parameters = BuildNucleiPayload(),
-                nativeThreads = Math.Max(1, (int)Math.Round(Environment.ProcessorCount * 0.75)),
+                nativeThreads = Math.Max(1, Environment.ProcessorCount),
             });
             if (result is null) return;
             _previewPaths["nuclei"] = result.Value.TryGetProperty("previewPath", out var preview) ? preview.GetString() ?? string.Empty : string.Empty;
@@ -651,10 +1294,26 @@ public partial class MainWindow : Window
         finalPreview.Margin = new Thickness(0, 16, 0, 0);
         finalStack.Children.Add(finalPreview);
 
+        var optimizerCard = CreateCard(_localization["AdvancedScreening"], optimizerStack);
+        optimizerCard.Visibility = _nucleiRunMode == ParameterRunMode.Advanced ? Visibility.Visible : Visibility.Collapsed;
+        var modeSelector = CreateModeSelector(
+            "NucleiRunMode",
+            "NucleiModeManual",
+            "NucleiModeAdvanced",
+            _nucleiRunMode,
+            _localization["NucleiManualModeHelp"],
+            _localization["NucleiAdvancedModeHelp"],
+            mode =>
+            {
+                _nucleiRunMode = mode;
+                optimizerCard.Visibility = mode == ParameterRunMode.Advanced ? Visibility.Visible : Visibility.Collapsed;
+            });
+
         return CreatePage(
             CreateCard(_localization["NucleusChannel"], channelRow),
-            CreateCard(_localization["ManualParameters"], parameterStack),
-            CreateCard(_localization["AdvancedScreening"], optimizerStack),
+            CreateCard(_localization["RunMode"], modeSelector),
+            optimizerCard,
+            CreateCard(_localization["FinalRunParameters"], parameterStack),
             CreateCard(_localization["FinalSegmentation"], finalStack));
     }
 
@@ -685,9 +1344,21 @@ public partial class MainWindow : Window
         {
             if (TryReadDouble(editor.Text, out var parsed))
             {
-                values[parameter.Key] = Math.Clamp(parsed, parameter.Minimum, parameter.Maximum);
-                editor.Text = values[parameter.Key].ToString("0.###", CultureInfo.CurrentCulture);
-                InvalidateAfter(ReferenceEquals(values, _assignmentValues) ? "cellTypes" : "nuclei");
+                var normalized = Math.Clamp(parsed, parameter.Minimum, parameter.Maximum);
+                editor.Text = normalized.ToString("0.###", CultureInfo.CurrentCulture);
+                if (AreClose(normalized, values[parameter.Key])) return;
+
+                values[parameter.Key] = normalized;
+                if (ReferenceEquals(values, _assignmentValues))
+                {
+                    _pendingAssignmentRecommendation = null;
+                    InvalidateAfter("cellTypes");
+                }
+                else
+                {
+                    _pendingNucleiRecommendation = null;
+                    InvalidateAfter("nuclei");
+                }
             }
             else editor.Text = values[parameter.Key].ToString("0.###", CultureInfo.CurrentCulture);
         };
@@ -724,9 +1395,20 @@ public partial class MainWindow : Window
         post_resplit_mult = _nucleiValues["post_resplit_mult"],
     };
 
-    private void ApplyNucleiRecommendation(JsonElement result)
+    private static JsonElement? ExtractRecommendation(JsonElement result)
     {
-        if (!result.TryGetProperty("recommendedParameters", out var recommended) || recommended.ValueKind != JsonValueKind.Object) return;
+        if (!result.TryGetProperty("recommendedParameters", out var recommended)
+            || recommended.ValueKind != JsonValueKind.Object
+            || !recommended.EnumerateObject().Any())
+        {
+            return null;
+        }
+        return recommended.Clone();
+    }
+
+    private void ApplyNucleiRecommendation(JsonElement recommended)
+    {
+        if (recommended.ValueKind != JsonValueKind.Object) return;
         foreach (var property in recommended.EnumerateObject())
         {
             if (_nucleiValues.ContainsKey(property.Name) && property.Value.ValueKind == JsonValueKind.Number)
@@ -741,6 +1423,11 @@ public partial class MainWindow : Window
         var tabs = new TabControl { Margin = new Thickness(24, 22, 24, 24) };
         tabs.Items.Add(new TabItem { Header = _localization["CellTypeDefinitions"], Content = BuildCellTypeRulesPanel() });
         tabs.Items.Add(new TabItem { Header = _localization["AssignmentParameters"], Content = BuildAssignmentPanel() });
+        tabs.SelectedIndex = Math.Clamp(_cellTypesTabIndex, 0, tabs.Items.Count - 1);
+        tabs.SelectionChanged += (_, _) =>
+        {
+            if (tabs.SelectedIndex >= 0) _cellTypesTabIndex = tabs.SelectedIndex;
+        };
         return tabs;
     }
 
@@ -748,19 +1435,29 @@ public partial class MainWindow : Window
     {
         var stack = new StackPanel { Margin = new Thickness(0, 18, 0, 0) };
         var actions = new WrapPanel { Margin = new Thickness(0, 0, 0, 12) };
-        actions.Children.Add(CreateButton(_localization["AddCellType"], (_, _) => _cellTypes.Add(new CellTypeRow { Name = $"Cell type {_cellTypes.Count + 1}", ColorHex = ChannelPalette[(_cellTypes.Count + 2) % ChannelPalette.Length] })));
+        actions.Children.Add(CreateButton(_localization["AddCellType"], (_, _) =>
+        {
+            _cellTypes.Add(new CellTypeRow { Name = $"Cell type {_cellTypes.Count + 1}", ColorHex = ChannelPalette[(_cellTypes.Count + 2) % ChannelPalette.Length] });
+            InvalidateCellTypeInputs();
+        }));
         actions.Children.Add(CreateButton(_localization["Remove"], (_, _) =>
         {
-            if (_cellTypes.Count > 0) _cellTypes.RemoveAt(_cellTypes.Count - 1);
+            if (_cellTypes.Count <= 0) return;
+            _cellTypes.RemoveAt(_cellTypes.Count - 1);
+            InvalidateCellTypeInputs();
         }));
         stack.Children.Add(actions);
         var grid = new DataGrid { ItemsSource = _cellTypes, MinHeight = 420 };
+        grid.CellEditEnding += (_, eventArgs) =>
+        {
+            if (eventArgs.EditAction == DataGridEditAction.Commit) InvalidateCellTypeInputs();
+        };
         grid.Columns.Add(new DataGridTextColumn { Header = _localization["CellTypeName"], Binding = new Binding(nameof(CellTypeRow.Name)) { UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged }, Width = 170 });
         grid.Columns.Add(new DataGridTemplateColumn
         {
             Header = _localization["Color"],
             CellTemplate = (DataTemplate)FindResource("ColorEditorTemplate"),
-            Width = 145,
+            Width = 86,
         });
         grid.Columns.Add(new DataGridTextColumn { Header = _localization["AllPositive"], Binding = new Binding(nameof(CellTypeRow.AllPositive)) { UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged }, Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
         grid.Columns.Add(new DataGridTextColumn { Header = _localization["AllNegative"], Binding = new Binding(nameof(CellTypeRow.AllNegative)) { UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged }, Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
@@ -791,7 +1488,13 @@ public partial class MainWindow : Window
         threshold.Items.Add(new ComboBoxItem { Content = "Yen", Tag = "yen" });
         threshold.Items.Add(new ComboBoxItem { Content = "Triangle", Tag = "triangle" });
         threshold.SelectedIndex = _thresholdMode switch { "yen" => 1, "triangle" => 2, _ => 0 };
-        threshold.SelectionChanged += (_, _) => _thresholdMode = ((ComboBoxItem)threshold.SelectedItem).Tag?.ToString() ?? "global_otsu";
+        threshold.SelectionChanged += (_, _) =>
+        {
+            var selectedMode = ((ComboBoxItem)threshold.SelectedItem).Tag?.ToString() ?? "global_otsu";
+            if (string.Equals(selectedMode, _thresholdMode, StringComparison.Ordinal)) return;
+            _thresholdMode = selectedMode;
+            InvalidateCellTypeInputs();
+        };
         thresholdPanel.Children.Add(threshold);
         thresholdPanel.Children.Add(new TextBlock
         {
@@ -807,8 +1510,18 @@ public partial class MainWindow : Window
             FontWeight = FontWeights.SemiBold,
             Margin = new Thickness(0, 16, 0, 0),
         };
-        resolve.Checked += (_, _) => _resolveAmbiguous = true;
-        resolve.Unchecked += (_, _) => _resolveAmbiguous = false;
+        resolve.Checked += (_, _) =>
+        {
+            if (_resolveAmbiguous) return;
+            _resolveAmbiguous = true;
+            InvalidateCellTypeInputs();
+        };
+        resolve.Unchecked += (_, _) =>
+        {
+            if (!_resolveAmbiguous) return;
+            _resolveAmbiguous = false;
+            InvalidateCellTypeInputs();
+        };
         thresholdPanel.Children.Add(resolve);
         thresholdPanel.Children.Add(new TextBlock
         {
@@ -818,25 +1531,20 @@ public partial class MainWindow : Window
             FontSize = 12.5, Foreground = (Brush)FindResource("SecondaryTextBrush"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 6, 0, 0),
         });
 
-        var optimizerPanel = new Border
-        {
-            Background = new SolidColorBrush(Color.FromRgb(244, 248, 249)),
-            BorderBrush = new SolidColorBrush(Color.FromRgb(214, 225, 228)),
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(7),
-            Padding = new Thickness(14),
-            Margin = new Thickness(0, 18, 0, 0),
-        };
         var optimizerStack = new StackPanel();
-        optimizerStack.Children.Add(new TextBlock { Text = _localization["AdvancedScreening"], FontSize = 16, FontWeight = FontWeights.SemiBold });
         optimizerStack.Children.Add(new TextBlock
         {
             Text = _localization["AssignmentOptimizerHelp"],
             TextWrapping = TextWrapping.Wrap,
             Foreground = (Brush)FindResource("SecondaryTextBrush"),
-            Margin = new Thickness(0, 6, 0, 10),
+            Margin = new Thickness(0, 0, 0, 10),
         });
-        optimizerStack.Children.Add(CreateNumberField(_localization["OptimizerBudget"], _assignmentOptimizerBudget, value => _assignmentOptimizerBudget = Math.Clamp(Math.Round(value), 1, 4096), ""));
+        optimizerStack.Children.Add(CreateNumberField(
+            _localization["OptimizerBudget"],
+            _assignmentOptimizerBudget,
+            value => _assignmentOptimizerBudget = value,
+            "",
+            normalize: value => Math.Clamp(Math.Round(value), 1, 4096)));
         var optimize = CreateButton(_localization["RunAssignmentOptimizer"], async (_, _) =>
         {
             var result = await RunWorkflowAsync("cellTypes", "celltype_optimizer", new
@@ -844,26 +1552,58 @@ public partial class MainWindow : Window
                 cellTypes = BuildCellTypePayload(),
                 parameters = BuildAssignmentPayload(),
                 maxEvaluations = (int)_assignmentOptimizerBudget,
-                parallelWorkers = Math.Max(1, Math.Min(4, Environment.ProcessorCount / 2)),
+                parallelWorkers = Math.Max(1, Environment.ProcessorCount),
                 parallelBackend = "threading",
                 useFixedRoiSubset = true,
             }, completesSection: false);
             if (result is null) return;
-            ApplyAssignmentRecommendation(result.Value);
+            _pendingAssignmentRecommendation = ExtractRecommendation(result.Value);
             _previewPaths["assignmentOptimizer"] = result.Value.TryGetProperty("previewPath", out var preview) && preview.ValueKind == JsonValueKind.String ? preview.GetString() ?? string.Empty : string.Empty;
             CaptureExportPaths(result.Value);
             DetailHost.Content = BuildCellTypesView();
         });
         optimize.Margin = new Thickness(0, 10, 0, 0);
         optimizerStack.Children.Add(optimize);
+        if (_pendingAssignmentRecommendation is JsonElement assignmentRecommendation)
+        {
+            optimizerStack.Children.Add(new TextBlock
+            {
+                Text = _localization["SuggestedComboReady"],
+                Foreground = (Brush)FindResource("SecondaryTextBrush"),
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 12, 0, 8),
+            });
+            var applySuggestion = CreateButton(_localization["ApplySuggestedCombo"], async (_, _) =>
+            {
+                var appliedParameters = _assignmentValues.ToDictionary(
+                    item => item.Key,
+                    item => (object?)item.Value);
+                appliedParameters["thresh_mode"] = _thresholdMode;
+                appliedParameters["resolve_ambiguous"] = _resolveAmbiguous;
+                foreach (var property in assignmentRecommendation.EnumerateObject())
+                {
+                    if (property.Value.ValueKind == JsonValueKind.Number)
+                        appliedParameters[property.Name] = property.Value.GetDouble();
+                    else if (property.Name == "thresh_mode" && property.Value.ValueKind == JsonValueKind.String)
+                        appliedParameters[property.Name] = property.Value.GetString();
+                    else if (property.Name == "resolve_ambiguous" && property.Value.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                        appliedParameters[property.Name] = property.Value.GetBoolean();
+                }
+                if (!await PersistAppliedRecommendationAsync("assignment", appliedParameters)) return;
+                ApplyAssignmentRecommendation(assignmentRecommendation);
+                _pendingAssignmentRecommendation = null;
+                SetLocalizedStatus("SuggestedComboApplied");
+                DetailHost.Content = BuildCellTypesView();
+            }, primary: true);
+            AutomationProperties.SetAutomationId(applySuggestion, "ApplyAssignmentSuggestedCombo");
+            optimizerStack.Children.Add(applySuggestion);
+        }
         if (_previewPaths.TryGetValue("assignmentOptimizer", out var assignmentOptimizerPreview))
         {
             var previewPanel = CreateImagePanel(_localization["AdvancedScreening"], assignmentOptimizerPreview);
             previewPanel.Margin = new Thickness(0, 14, 0, 0);
             optimizerStack.Children.Add(previewPanel);
         }
-        optimizerPanel.Child = optimizerStack;
-
         var run = CreateButton(_localization["RunAssignment"], async (_, _) =>
         {
             var result = await RunWorkflowAsync("cellTypes", "celltype_assignment", new
@@ -871,8 +1611,8 @@ public partial class MainWindow : Window
                 nucleusChannel = _nucleusChannel,
                 cellTypes = BuildCellTypePayload(),
                 parameters = BuildAssignmentPayload(),
-                nativeThreads = Math.Max(1, Environment.ProcessorCount / 2),
-                supportWorkers = Math.Max(1, Environment.ProcessorCount / 2),
+                nativeThreads = Math.Max(1, Environment.ProcessorCount),
+                supportWorkers = Math.Max(1, Environment.ProcessorCount),
             });
             if (result is null) return;
             _previewPaths["cellTypes"] = result.Value.TryGetProperty("previewPath", out var preview) && preview.ValueKind == JsonValueKind.String ? preview.GetString() ?? string.Empty : string.Empty;
@@ -887,19 +1627,43 @@ public partial class MainWindow : Window
         }, primary: true);
         run.Margin = new Thickness(0, 18, 0, 0);
 
-        var stack = new StackPanel();
-        stack.Children.Add(parameters);
-        stack.Children.Add(thresholdPanel);
-        stack.Children.Add(optimizerPanel);
-        stack.Children.Add(new TextBlock { Text = _localization["ResultsStayEnglish"], FontSize = 12.5, Foreground = (Brush)FindResource("SecondaryTextBrush"), Margin = new Thickness(0, 14, 0, 0) });
-        stack.Children.Add(run);
+        var finalRunStack = new StackPanel();
+        finalRunStack.Children.Add(parameters);
+        finalRunStack.Children.Add(thresholdPanel);
+        finalRunStack.Children.Add(new TextBlock { Text = _localization["ResultsStayEnglish"], FontSize = 12.5, Foreground = (Brush)FindResource("SecondaryTextBrush"), Margin = new Thickness(0, 14, 0, 0) });
+        finalRunStack.Children.Add(run);
         if (_previewPaths.TryGetValue("cellTypes", out var previewPath) && !string.IsNullOrWhiteSpace(previewPath))
         {
             var preview = CreateImagePanel(_localization["CellTypesTitle"], previewPath);
             preview.Margin = new Thickness(0, 18, 0, 0);
-            stack.Children.Add(preview);
+            finalRunStack.Children.Add(preview);
         }
-        return new ScrollViewer { Content = CreateCard(_localization["AssignmentParameters"], stack), VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+
+        var optimizerCard = CreateCard(_localization["AdvancedScreening"], optimizerStack);
+        optimizerCard.Visibility = _assignmentRunMode == ParameterRunMode.Advanced ? Visibility.Visible : Visibility.Collapsed;
+        var modeSelector = CreateModeSelector(
+            "AssignmentRunMode",
+            "AssignmentModeManual",
+            "AssignmentModeAdvanced",
+            _assignmentRunMode,
+            _localization["AssignmentManualModeHelp"],
+            _localization["AssignmentAdvancedModeHelp"],
+            mode =>
+            {
+                _assignmentRunMode = mode;
+                optimizerCard.Visibility = mode == ParameterRunMode.Advanced ? Visibility.Visible : Visibility.Collapsed;
+            });
+
+        var content = new StackPanel { Margin = new Thickness(0, 18, 0, 0) };
+        content.Children.Add(CreateCard(_localization["AssignmentMode"], modeSelector));
+        content.Children.Add(optimizerCard);
+        content.Children.Add(CreateCard(_localization["FinalRunParameters"], finalRunStack));
+        return new ScrollViewer
+        {
+            Content = content,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+        };
     }
 
     private object[] BuildCellTypePayload() => _cellTypes.Select(item => new
@@ -927,9 +1691,9 @@ public partial class MainWindow : Window
         ambiguous_min_gap = _assignmentValues["ambiguous_min_gap"],
     };
 
-    private void ApplyAssignmentRecommendation(JsonElement result)
+    private void ApplyAssignmentRecommendation(JsonElement recommended)
     {
-        if (!result.TryGetProperty("recommendedParameters", out var recommended) || recommended.ValueKind != JsonValueKind.Object) return;
+        if (recommended.ValueKind != JsonValueKind.Object) return;
         foreach (var property in recommended.EnumerateObject())
         {
             if (_assignmentValues.ContainsKey(property.Name) && property.Value.ValueKind == JsonValueKind.Number)
@@ -942,10 +1706,45 @@ public partial class MainWindow : Window
         InvalidateAfter("cellTypes");
     }
 
+    private async Task<bool> PersistAppliedRecommendationAsync(
+        string kind,
+        IReadOnlyDictionary<string, object?> parameters)
+    {
+        if (_isBusy)
+        {
+            SetLocalizedStatus("AnalysisAlreadyRunning", isError: true);
+            return false;
+        }
+
+        _isBusy = true;
+        UpdateHeader();
+        try
+        {
+            await _engine.SendAsync("apply_recommendation", new { kind, parameters });
+            return true;
+        }
+        catch (Exception exception)
+        {
+            SetStatus(LocalizeEngineError(exception.Message), isError: true);
+            return false;
+        }
+        finally
+        {
+            _isBusy = false;
+            UpdateHeader();
+        }
+    }
+
+    private void InvalidateCellTypeInputs()
+    {
+        _pendingAssignmentRecommendation = null;
+        InvalidateAfter("cellTypes");
+    }
+
     private UIElement BuildNeighborhoodView()
     {
         var gridSize = 20.0;
-        var field = CreateNumberField(_localization["GridSize"], gridSize, value => gridSize = value, "µm");
+        var field = CreateNumberField(_localization["GridSize"], gridSize, value => gridSize = value, "µm", "neighborhood");
         var stack = new StackPanel();
         stack.Children.Add(field);
         var run = CreateButton(_localization["RunNeighborhood"], async (_, _) =>
@@ -971,10 +1770,10 @@ public partial class MainWindow : Window
         var minArea = 20000.0;
         var minCells = 5.0;
         var parameters = new UniformGrid { Columns = 2 };
-        parameters.Children.Add(CreateNumberField(_localization["ClosingRadius"], close, value => close = value, "µm"));
-        parameters.Children.Add(CreateNumberField(_localization["DilationRadius"], dilate, value => dilate = value, "µm"));
-        parameters.Children.Add(CreateNumberField(_localization["MinimumArea"], minArea, value => minArea = value, "µm²"));
-        parameters.Children.Add(CreateNumberField(_localization["MinimumCells"], minCells, value => minCells = value, ""));
+        parameters.Children.Add(CreateNumberField(_localization["ClosingRadius"], close, value => close = value, "µm", "region"));
+        parameters.Children.Add(CreateNumberField(_localization["DilationRadius"], dilate, value => dilate = value, "µm", "region"));
+        parameters.Children.Add(CreateNumberField(_localization["MinimumArea"], minArea, value => minArea = value, "µm²", "region"));
+        parameters.Children.Add(CreateNumberField(_localization["MinimumCells"], minCells, value => minCells = value, "", "region"));
         var stack = new StackPanel();
         stack.Children.Add(new TextBlock { Text = _localization["SelectedCellTypes"], FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 6) });
         stack.Children.Add(typePicker);
@@ -1003,7 +1802,7 @@ public partial class MainWindow : Window
         var stack = new StackPanel();
         stack.Children.Add(new TextBlock { Text = _localization["Boundary"], FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 6) });
         stack.Children.Add(boundary);
-        stack.Children.Add(CreateNumberField(_localization["BandWidth"], bandWidth, value => bandWidth = value, "µm"));
+        stack.Children.Add(CreateNumberField(_localization["BandWidth"], bandWidth, value => bandWidth = value, "µm", "distribution"));
         var run = CreateButton(_localization["RunDistribution"], async (_, _) =>
         {
             var result = await RunWorkflowAsync("distribution", "cell_distribution", new
@@ -1122,6 +1921,8 @@ public partial class MainWindow : Window
             SetLocalizedStatus("CompletePreviousSteps", isError: true);
             return null;
         }
+        var previousStatus = section.Status;
+        if (completesSection) InvalidateAfter(sectionKey);
         _isBusy = true;
         _activeSectionKey = sectionKey;
         section.Status = WorkflowStatus.Running;
@@ -1131,7 +1932,7 @@ public partial class MainWindow : Window
         try
         {
             var result = await _engine.SendAsync(command, payload);
-            section.Status = completesSection ? WorkflowStatus.Complete : WorkflowStatus.Ready;
+            section.Status = completesSection ? WorkflowStatus.Complete : previousStatus;
             if (completesSection) MarkNextReady(sectionKey);
             SetLocalizedStatus("AnalysisComplete");
             UpdateProgressMetadata();
@@ -1140,7 +1941,7 @@ public partial class MainWindow : Window
         }
         catch (Exception exception)
         {
-            section.Status = WorkflowStatus.Error;
+            section.Status = completesSection ? WorkflowStatus.Error : previousStatus;
             SetStatus(LocalizeEngineError(exception.Message), isError: true);
             UpdateHeader();
             return null;
@@ -1162,8 +1963,44 @@ public partial class MainWindow : Window
 
     private void InvalidateAfter(string sectionKey)
     {
+        if (sectionKey == "inputs") ++_outputRestoreGeneration;
         var index = _sections.ToList().FindIndex(section => section.Key == sectionKey);
         if (index < 0) return;
+
+        void RemovePreviews(params string[] keys)
+        {
+            foreach (var key in keys) _previewPaths.Remove(key);
+        }
+
+        if (index <= _sections.ToList().FindIndex(section => section.Key == "overlay"))
+        {
+            RemovePreviews("overlay", "split");
+            _exportPaths.Clear();
+        }
+        if (index <= _sections.ToList().FindIndex(section => section.Key == "nuclei"))
+        {
+            RemovePreviews("nucleiOptimizer", "nuclei");
+            _pendingNucleiRecommendation = null;
+        }
+        if (index <= _sections.ToList().FindIndex(section => section.Key == "cellTypes"))
+        {
+            RemovePreviews("assignmentOptimizer", "cellTypes");
+            _pendingAssignmentRecommendation = null;
+            _resolvedCellTypes.Clear();
+        }
+        if (index <= _sections.ToList().FindIndex(section => section.Key == "neighborhood"))
+            RemovePreviews("neighborhood");
+        if (index <= _sections.ToList().FindIndex(section => section.Key == "region"))
+        {
+            RemovePreviews("region");
+            _boundaries.Clear();
+        }
+        if (index <= _sections.ToList().FindIndex(section => section.Key == "distribution"))
+            RemovePreviews("distribution");
+        if (index <= _sections.ToList().FindIndex(section => section.Key == "distance"))
+            RemovePreviews("distance_nearest", "distance_boundary");
+        _outputFiles.Clear();
+
         for (var position = index + 1; position < _sections.Count; position++) _sections[position].Status = WorkflowStatus.NotStarted;
         if (_sections[index].Status == WorkflowStatus.Complete) _sections[index].Status = WorkflowStatus.Ready;
         UpdateProgressMetadata();
@@ -1250,6 +2087,53 @@ public partial class MainWindow : Window
     private static bool TryReadDouble(string text, out double value) =>
         double.TryParse(text, NumberStyles.Float, CultureInfo.CurrentCulture, out value)
         || double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+
+    private static bool AreClose(double left, double right) =>
+        Math.Abs(left - right) <= 1e-9 * Math.Max(1, Math.Max(Math.Abs(left), Math.Abs(right)));
+
+    private static bool PathsEqual(string left, string right)
+    {
+        try
+        {
+            return string.Equals(
+                Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    private static bool TryGetJsonNumber(JsonElement element, string propertyName, out double value)
+    {
+        value = 0;
+        return element.TryGetProperty(propertyName, out var property)
+            && property.ValueKind == JsonValueKind.Number
+            && property.TryGetDouble(out value);
+    }
+
+    private static bool TryGetJsonString(JsonElement element, string propertyName, out string value)
+    {
+        value = string.Empty;
+        if (!element.TryGetProperty(propertyName, out var property) || property.ValueKind != JsonValueKind.String) return false;
+        value = property.GetString() ?? string.Empty;
+        return value.Length > 0;
+    }
+
+    private static string JoinJsonStrings(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var values) || values.ValueKind != JsonValueKind.Array) return string.Empty;
+        return string.Join(", ", values.EnumerateArray().Select(value => value.GetString()).Where(value => !string.IsNullOrWhiteSpace(value)));
+    }
+
+    private static string JoinJsonGroups(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var groups) || groups.ValueKind != JsonValueKind.Array) return string.Empty;
+        return string.Join(" | ", groups.EnumerateArray().Where(group => group.ValueKind == JsonValueKind.Array).Select(group =>
+            string.Join(", ", group.EnumerateArray().Select(value => value.GetString()).Where(value => !string.IsNullOrWhiteSpace(value)))));
+    }
 
     private static string[] SplitMarkers(string value) => value
         .Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)

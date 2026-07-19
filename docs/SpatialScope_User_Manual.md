@@ -1,6 +1,6 @@
 # SpatialScope User Manual
 
-**Applies to:** SpatialScope 1.2.1 for macOS and SpatialScope 2.0.0 for Windows<br>
+**Applies to:** SpatialScope 1.2.1 for macOS and SpatialScope 1.2.1 for Windows<br>
 **Workflow:** image preparation → aligned channel CSV files → composite preview → nuclei → cell types → neighborhoods → regions → distribution → distances → exports
 
 > The screenshots show the macOS interface with an example 16-channel dataset. Windows uses the same nine-stage analysis workflow and output contracts in a native WPF desktop layout, so control placement differs slightly. Marker names, colors, cell types, counts, and results will vary by dataset.
@@ -67,7 +67,7 @@ The intended in-app order is left to right in the sidebar. You can open any step
 ### 2.1 System requirements
 
 - macOS 13 or later on Apple Silicon or Intel, or 64-bit Windows 10 or 11.
-- A packaged SpatialScope `.app` or the complete extracted Windows portable package.
+- A packaged SpatialScope `.app` or an installed Windows copy of SpatialScope.
 - Enough RAM for all selected channel matrices and intermediate masks. Memory use grows with image width × image height × number of channels.
 - Write permission for the selected output folder.
 
@@ -145,19 +145,19 @@ The pixel dimensions you enter are not checked against the CSV dimensions. Enter
 
 ### 2.5 Use a separate output folder for each dataset
 
-For a new dataset, start with a new, empty output folder. On macOS, selecting an output folder that contains SpatialScope results automatically imports its saved pipeline configuration. On Windows, selecting the folder only changes the destination; scanning and configuration occur when you click **Rescan CSV Files** or **Save Configuration**. On either platform, reusing an output folder can leave older files beside newer outputs.
+For a new dataset, start with a new, empty output folder. Selecting an output folder that contains recognized SpatialScope results automatically imports the saved pipeline state on both platforms. On Windows, validated parameters, completed stages, previews, and exports are restored, while the folder selected in the current dialog remains the output destination. For an empty Windows output folder, scanning and configuration occur when you click **Rescan CSV Files** or **Save Configuration**. Reusing an old output folder resumes that run, so do not select it for a different dataset.
 
 A safe order for a new analysis is:
 
 1. choose or create the new output folder;
 2. choose the input folder;
-3. on Windows, click **Save Configuration** to scan and configure the selected data;
+3. on Windows, click **Save Configuration** to scan and configure the selected data in the new output folder;
 4. quit and reopen SpatialScope if you need a guaranteed clean in-memory session;
 5. confirm or reselect the new output and input folders;
 6. configure channels and calibration; and
 7. run every downstream step again.
 
-On macOS, selecting a different empty output folder clears the overlay previews but not every downstream result already held in memory. On Windows, changing either path invalidates downstream step statuses but does not immediately scan files or clear every cached preview. If you do not restart, treat any visible nuclei, assignment, neighborhood, region, distribution, or distance result as stale until you rerun that step sequentially for the new dataset.
+On macOS, selecting a different empty output folder clears the overlay previews but not every downstream result already held in memory. On Windows, selecting an empty output folder clears loaded history and invalidates downstream step statuses; selecting a folder with valid history restores that run and opens the latest completed step. Changing the input folder invalidates downstream results but does not immediately scan files. After changing datasets, treat any visible result as stale until you save the new configuration and rerun each step sequentially.
 
 ---
 
@@ -165,7 +165,7 @@ On macOS, selecting a different empty output folder clears the overlay previews 
 
 ### 3.1 Launch a packaged app
 
-On macOS, open `SpatialScope.app` in Finder. On Windows, extract the complete `SpatialScope-Windows-x64-Portable-2.0.0.zip` archive, keep the `engine` folder beside `SpatialScope.exe`, and run `SpatialScope.exe` from the extracted folder. Follow the [installation guide](INSTALLATION.md) if Gatekeeper or Windows SmartScreen requests first-launch approval.
+On macOS, open `SpatialScope.app` in Finder. On Windows, run `SpatialScope-Windows-x64-Setup.exe`, complete the installation, and launch SpatialScope from the Start menu or desktop shortcut. Follow the [installation guide](INSTALLATION.md) if Gatekeeper or Windows SmartScreen requests first-launch approval.
 
 ### 3.2 Launch from the source repository
 
@@ -185,7 +185,7 @@ On Windows, prepare and test the native source application from PowerShell:
 .\windows\run_native.ps1 run
 ```
 
-To build and validate the self-contained portable ZIP, run:
+To build and validate the self-contained Windows installer, run:
 
 ```powershell
 .\windows\build_native.ps1 -FullSmoke
@@ -214,7 +214,7 @@ The sidebar status is a workflow indicator, not a scientific validation guarante
 - Use **Command-O** on macOS to choose an input folder. On Windows, click the input or output path field or its **Choose** button to open the native folder browser.
 - On macOS, use **Command-R** to generate the overlay. On Windows, select the overlay command in Step 2.
 - On macOS, image previews can be scrolled when zoomed, pinch-zoomed from approximately 0.08× to 16×, and double-clicked to reset to fit.
-- Windows image previews stay fitted inside their panels; use **Open Original** to inspect a generated image with the system viewer.
+- On Windows, place the pointer over any plot and use the mouse wheel to zoom. Drag to pan while zoomed; double-click or press **0** to fit the image again. The **+**, **-**, and arrow keys provide keyboard zoom and pan after the plot receives focus.
 - The bottom **Open Output** button reveals the current output folder; it does not choose a different output folder.
 - Errors appear in the status bar rather than in a modal dialog.
 - There is no visible Cancel button in the current interface. Wait for a running operation to finish before starting another.
@@ -247,7 +247,7 @@ At each final result, inspect the image and tables before proceeding. Screening 
 
 1. Open **01 Inputs & Calibration**.
 2. Under **Data locations**, click **Choose** beside **Output folder** and select a new output folder for this dataset.
-3. Click **Choose** beside **Input folder** and select the folder containing the channel CSVs. macOS scans it immediately; on Windows click **Rescan CSV Files** or **Save Configuration** to scan and configure it.
+3. Click **Choose** beside **Input folder** and select the folder containing the channel CSVs. macOS scans it immediately; on Windows click **Rescan CSV Files** or **Save Configuration** to scan and configure it. If the selected output folder already contained valid Windows results, that history was loaded automatically before this step.
 4. After the scan completes, confirm that the status bar reports the expected number of CSV channels.
 
 If files were added after the folder was selected, click **Rescan CSV Files**.
@@ -267,7 +267,7 @@ Helpful buttons:
 
 - **Reset Marker Names** restores marker names from filename stems.
 - **Reassign Colors** generates a different palette.
-- On macOS, a color swatch opens the system color picker. On Windows, edit the `#RRGGBB` value beside the swatch.
+- Click a marker color swatch to open the native color picker on either platform. Windows shows the color itself rather than an editable hexadecimal code.
 
 Use consistent, unique marker names. Marker-rule matching later ignores case and nonalphanumeric punctuation, so `CD-3`, `CD_3`, and `CD3` are treated as the same name.
 
@@ -428,7 +428,7 @@ Screening uses a nearest-neighbor downsample whose maximum dimension depends on 
 
 *Figure 6. Advanced nuclei scan plot, screened combinations, and the parameter panel for the final run.*
 
-The table reports combination number, stage, detected-nuclei count, and parameter values. The recommended combination is the one with the greatest detected count. At scan completion, the recommended values are copied into the final-run parameter panel.
+The table reports combination number, stage, detected-nuclei count, and parameter values. The recommended combination is the one with the greatest detected count. At scan completion, review the recommendation and explicitly apply it before the final run; screening does not change final-run parameters by itself. On Windows, click **Apply the suggested combo to final run**. On macOS, use **Apply Selected Combo**.
 
 To use another candidate:
 
@@ -564,7 +564,7 @@ The recommendation prioritizes:
 3. fewer Unassigned cells; and
 4. more assigned cells.
 
-The suggested values are copied to the final parameter panel after screening. To use another row, select it and click **Apply Selected Combo**.
+Screening reports suggested values without changing the final parameter panel. On Windows, click **Apply the suggested combo to final run** after reviewing the recommendation. On macOS, select the desired row and click **Apply Selected Combo**.
 
 > A low unresolved count can result from aggressive overassignment. Compare candidate maps against known marker biology. Check cells at phenotype boundaries and in crowded regions.
 
@@ -756,9 +756,9 @@ The distributed macOS and Windows applications include a self-contained Cell Dis
 
 Developers rebuilding macOS SpatialScope create the helpers with `script/build_cell_distribution_runtime.sh`; the release package selects the native helper at runtime. Windows developers prepare the engine with `windows/run_native.ps1 setup` and package it with `windows/build_native.ps1 -FullSmoke`.
 
-If a packaged release reports a missing Cell Distribution runtime, reinstall the complete macOS application from the official DMG or re-extract the complete Windows ZIP. Do not move files out of the `.app` bundle or move `SpatialScope.exe` away from its adjacent `engine` folder.
+If a packaged release reports a missing Cell Distribution runtime, reinstall the complete macOS application from the official DMG or rerun the complete Windows setup program. Do not move files out of the `.app` bundle or move `SpatialScope.exe` out of its Windows installation folder.
 
-Once the Python process starts, the current cancellation mechanism does not terminate it. Allow the process to finish.
+There is no per-step Cancel button. On Windows, closing SpatialScope performs a bounded shutdown and stops its packaged analysis engine; on macOS, allow the active helper operation to finish.
 
 ### 11.2 Generate Region masks first
 
@@ -940,8 +940,8 @@ SpatialScope creates the following top-level structure:
 
 ### 14.1 Important file meanings
 
-- `pipeline_config.json` is the core input/overlay/nuclei/assignment configuration. On macOS it supports automatic import when the output folder is selected again; Windows does not automatically import it when a path is chosen. It does not contain the complete downstream workflow state.
-- Its input and output paths are absolute. After data or an output folder is moved or copied, macOS automatic import can point the app back to the original saved output directory, and Step 7 can still seek the original input CSV path. On either platform, reselect both folders and save the configuration after moving a dataset.
+- `pipeline_config.json` is the core input/overlay/nuclei/assignment configuration. Both platforms use it when recognized results are selected again. The Windows app also reads its atomic workflow manifest and validated artifacts to restore completed stages, previews, recommendations, and exports; `pipeline_config.json` alone does not contain the complete downstream workflow state.
+- Saved input paths are absolute. After input data is moved, reselect the input folder and save the configuration. On Windows, selecting a copied or moved output folder keeps the folder chosen in the current dialog as the output destination, but downstream steps can still require access to the original input CSV path until configuration is saved again.
 - `nuclei_summary.csv` contains label, X/Y centroid in pixels, area in pixels, and normalized mean intensity.
 - Exported nucleus and cell centroids use zero-based pixel coordinates with the origin at the input matrix’s top-left; X increases rightward and Y increases downward. Label maps and masks use the same row-major orientation.
 - `nuclei_label_map.json` contains the full per-pixel nucleus label map and can be large.
@@ -970,7 +970,7 @@ SpatialScope creates the following top-level structure:
 
 ### 15.1 Keep one output folder per dataset and run
 
-Do not point a new input dataset at an old output folder. Changing the input or output folder does not clear every in-memory downstream result. For a guaranteed clean session, choose the new paths, quit and reopen the app, confirm or reselect those paths, and rerun every step in order. Without a restart, consider all visible downstream results stale until recomputed.
+Do not point a new input dataset at an old output folder. On Windows, selecting an old output folder automatically restores its recognized history; use a new empty folder for a new run. Changing the input path invalidates downstream results but may leave previews visible until they are recomputed. For a guaranteed clean session, choose the new paths, quit and reopen the app, confirm or reselect those paths, and rerun every step in order.
 
 ### 15.2 Save configuration and cell types explicitly
 
@@ -1044,7 +1044,7 @@ Before accepting a recommendation:
 | Concave Free draw becomes broader | Free draw is converted to a convex hull | Use Polygon mode or several smaller closed areas |
 | Cell Distribution says resolution is required | Calibration is missing | Enter and save all four calibration values |
 | Distance Analysis reports µm despite missing scale | Step 8 silently fell back to 1 µm/pixel | Enter and save valid X/Y calibration, then rerun the distance analysis |
-| Cell Distribution runtime error | The application package is incomplete, damaged, or from an unsupported build | Reinstall the complete app from the official DMG or re-extract the complete Windows ZIP; keep the Windows `engine` folder beside `SpatialScope.exe`; source builders should rebuild the bundled runtime |
+| Cell Distribution runtime error | The application package is incomplete, damaged, or from an unsupported build | Reinstall the complete app from the official DMG or rerun the complete Windows installer; source builders should rebuild the bundled runtime |
 | Step 7 fails after moving/copying a run | `pipeline_config.json` still stores the original absolute CSV path | Restore access to the original inputs or reselect the input/output folders and save configuration |
 | Cell density uses the wrong boundary/band width | It loads the most recently modified Region masks arrays | Regenerate the intended Region masks immediately before density |
 | No boundary masks found | No Region Analysis mask has been saved | Run computational ROI identification or save an adjusted ROI |
@@ -1100,7 +1100,7 @@ Automated Region Analysis aggregates all retained disconnected mask islands for 
 
 ### 17.4 Cell Distribution portability and cancellation
 
-Step 7 is self-contained in both distributed applications. macOS selects the bundled helper matching the Mac's architecture; Windows uses the private packaged analysis engine. Once the operation starts, the current interface does not terminate the active helper or engine operation, so allow it to finish.
+Step 7 is self-contained in both distributed applications. macOS selects the bundled helper matching the Mac's architecture; Windows uses the private packaged analysis engine. There is no per-step Cancel button. Closing the Windows app stops its owned engine after a bounded shutdown; on macOS, allow the active helper operation to finish.
 
 ### 17.5 Statistical interpretation
 

@@ -15,26 +15,24 @@
         Background="#F4F7F7">
     <Window.Resources>
         <DataTemplate x:Key="ColorEditorTemplate">
-            <Grid VerticalAlignment="Center">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="34" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
-                <Border Width="28"
-                        Height="18"
-                        CornerRadius="9"
-                        BorderBrush="#B9C5C8"
+            <Button Click="ColorSwatch_Click"
+                    Loaded="ColorSwatch_Loaded"
+                    Width="54"
+                    Height="34"
+                    Padding="3"
+                    Background="#F8FAFA"
+                    BorderBrush="#AAB9BC"
+                    BorderThickness="1"
+                    Cursor="Hand"
+                    HorizontalAlignment="Left"
+                    HorizontalContentAlignment="Stretch"
+                    VerticalContentAlignment="Stretch"
+                    ToolTip="Choose color">
+                <Border CornerRadius="7"
+                        BorderBrush="#7D8B8E"
                         BorderThickness="1"
-                        Background="{Binding ColorBrush}"
-                        VerticalAlignment="Center" />
-                <TextBox Grid.Column="1"
-                         Text="{Binding ColorHex, UpdateSourceTrigger=PropertyChanged}"
-                         MinHeight="30"
-                         Padding="5,2"
-                         BorderThickness="0"
-                         Background="Transparent"
-                         VerticalContentAlignment="Center" />
-            </Grid>
+                        Background="{Binding ColorBrush}" />
+            </Button>
         </DataTemplate>
 
         <Style TargetType="ToolTip">
@@ -84,6 +82,54 @@
             <Setter Property="Padding" Value="13,7" />
             <Setter Property="MinHeight" Value="36" />
             <Setter Property="Cursor" Value="Hand" />
+        </Style>
+
+        <Style x:Key="SegmentedModeButtonStyle" TargetType="RadioButton">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="MinHeight" Value="42" />
+            <Setter Property="Padding" Value="16,9" />
+            <Setter Property="Margin" Value="2" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Border x:Name="SegmentBorder"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="6"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                              RecognizesAccessKey="True" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="SegmentBorder" Property="Background" Value="#E5F1F3" />
+                                <Setter TargetName="SegmentBorder" Property="BorderBrush" Value="#B5D6DA" />
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="SegmentBorder" Property="Background" Value="{StaticResource AccentBrush}" />
+                                <Setter TargetName="SegmentBorder" Property="BorderBrush" Value="#006A75" />
+                                <Setter Property="Foreground" Value="White" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="SegmentBorder" Property="BorderBrush" Value="#F59E0B" />
+                                <Setter TargetName="SegmentBorder" Property="BorderThickness" Value="2" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.55" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
 
         <Style TargetType="TextBox">

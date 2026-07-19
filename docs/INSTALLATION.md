@@ -12,21 +12,17 @@ SpatialScope is distributed directly through [GitHub Releases](https://github.co
 
 ### Install
 
-1. Download [`SpatialScope-Windows-x64-Portable-2.0.0.zip`](https://github.com/fengshuoliu/SpatialScope/releases/download/windows-v2.0.0/SpatialScope-Windows-x64-Portable-2.0.0.zip).
-2. Verify the ZIP against `SHA256SUMS-Windows.txt` from the same Windows release.
-3. Extract the complete ZIP to a writable folder.
-4. Open the extracted folder and run `SpatialScope.exe`.
+1. [Download the latest SpatialScope for Windows](https://github.com/fengshuoliu/SpatialScope/releases/download/windows-v1.2.1/SpatialScope-Windows-x64-Setup.exe).
+2. Verify `SpatialScope-Windows-x64-Setup.exe` against `SHA256SUMS-Windows.txt` from the same Windows release.
+3. Run `SpatialScope-Windows-x64-Setup.exe` and follow the installation prompts.
+4. Launch SpatialScope from the Start menu or desktop shortcut.
 5. If Microsoft Defender SmartScreen appears, select **More info**, confirm that the app name is SpatialScope, and select **Run anyway**.
 
-Keep the extracted `engine` folder beside `SpatialScope.exe`; moving only the executable makes the scientific workflows unavailable. SpatialScope is not signed with a commercial code-signing certificate. A SmartScreen prompt is expected for an independently distributed build and does not require disabling Windows Security. Organization-managed computers may require administrator approval.
-
-The native Windows package does not run an installer or create Start-menu and desktop shortcuts. Create a shortcut to `SpatialScope.exe` manually if desired.
-
-If Windows lists an installed SpatialScope application under `C:\Program Files\SpatialScope`, or the application opens a window titled **Streamlit**, remove that retired 1.2.0 installation from **Settings > Apps > Installed apps**. It is not the native Windows 2.0 application. Then extract a fresh copy of the 2.0 ZIP and run the `SpatialScope.exe` inside that extracted folder.
+The installer keeps the application and its private analysis engine together. Do not move `SpatialScope.exe` out of its installation folder. SpatialScope is not signed with a commercial code-signing certificate. A SmartScreen prompt is expected for an independently distributed build and does not require disabling Windows Security. Organization-managed computers may require administrator approval.
 
 ### Windows updates
 
-Windows updates are manual. Download the newer Windows portable ZIP from GitHub Releases, close SpatialScope, extract the complete package into a new folder, and run its `SpatialScope.exe`. Keep the previous folder until you have confirmed that the new version opens your data and outputs correctly.
+Windows updates are manual. Close SpatialScope, download the latest Windows setup program from GitHub Releases, and run it to update the installed application. The installer does not remove analysis files from output folders you selected separately.
 
 ## macOS 13 or later
 
@@ -69,7 +65,7 @@ shasum -a 256 ~/Downloads/SpatialScope-macOS-universal.dmg
 On Windows PowerShell:
 
 ```powershell
-Get-FileHash -Algorithm SHA256 "$HOME\Downloads\SpatialScope-Windows-x64-Portable-2.0.0.zip"
+Get-FileHash -Algorithm SHA256 "$HOME\Downloads\SpatialScope-Windows-x64-Setup.exe"
 ```
 
 Compare the result with `SHA256SUMS.txt` for macOS or `SHA256SUMS-Windows.txt` for Windows on the corresponding platform release.

@@ -1,6 +1,6 @@
 # SpatialScope for Windows
 
-SpatialScope 2.0 is a native Windows desktop application. Its interface is WPF/.NET, its analysis engine runs as a private local process, and it does not use Streamlit or a browser.
+SpatialScope 1.2.1 is a native Windows desktop application. Its interface is WPF/.NET, its analysis engine runs as a private local process, and it does not use Streamlit or a browser.
 
 ## Architecture
 
@@ -10,9 +10,9 @@ SpatialScope 2.0 is a native Windows desktop application. Its interface is WPF/.
 - `tests/native_overlay_smoke.py` reproduces configuration through Composite Preview (Step 2).
 - `tests/native_engine_smoke.py` exercises the complete nine-step workflow.
 - `run_native.ps1` prepares and runs the source application for local development.
-- `build_native.ps1` produces the self-contained portable Windows package.
+- `build_native.ps1` produces the self-contained Windows setup program.
 
-The previous Electron/Streamlit implementation remains in `desktop/` and `backend/app.py` for compatibility and reference only. It is not used by the native 2.0 package.
+The previous Electron/Streamlit implementation remains in `desktop/` and `backend/app.py` for compatibility and reference only. It is not used by the native 1.2.1 installer.
 
 ## Test and adjust locally
 
@@ -44,7 +44,7 @@ Run the source renderer, WPF build, and complete nine-step scientific smoke test
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\windows\run_native.ps1 test
 ```
 
-## Build a portable release
+## Build an installer release
 
 After source testing, create and validate the self-contained Windows package:
 
@@ -54,9 +54,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\windows\build_native.p
 
 Once dependencies are already installed, add `-SkipDependencies` to save time. The build checks the frozen Matplotlib renderer, runs Step 2 against the frozen engine, optionally runs all nine workflow stages, and then writes:
 
-- `native/dist/SpatialScope-Windows-x64-Portable-2.0.0.zip`
+- `native/dist/SpatialScope-Windows-x64-Setup.exe`
 - `native/dist/SHA256SUMS-Windows.txt`
 
-Unzip the archive and run `SpatialScope.exe`; Python, Node.js, Electron, Streamlit, and the .NET SDK are not required on the test machine. The executable is currently unsigned, so Windows SmartScreen may require **More info > Run anyway** the first time.
+Run the setup program and launch SpatialScope from the Start menu or desktop shortcut. Python, Node.js, Electron, Streamlit, and the .NET SDK are not required on the test machine. The installer is currently unsigned, so Windows SmartScreen may require **More info > Run anyway** the first time.
 
-Do not distribute or test the older 1.2.0 package: that freeze omitted `matplotlib.backends.backend_svg`, which Step 2 imports when it saves SVG files. The native 2.0 build explicitly bundles and smoke-tests that backend.
+The native 1.2.1 build explicitly bundles and smoke-tests `matplotlib.backends.backend_svg`, which Step 2 uses when it saves SVG files.

@@ -114,6 +114,10 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
         hello = engine.request("hello", {})
         if hello["protocolVersion"] != 1:
             raise AssertionError(f"Unexpected engine protocol: {hello}")
+        expected_cpu_count = max(1, os.cpu_count() or 1)
+        compute = hello.get("compute", {})
+        if int(compute.get("defaultCpuWorkers", 0)) != expected_cpu_count:
+            raise AssertionError(f"Engine did not default to all logical CPUs: {compute}")
 
         configure = engine.request(
             "configure",
@@ -139,7 +143,6 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
             {
                 "parameters": {"nucleus_channel": "DAPI", "min_diam_um": 6.0, "max_diam_um": 16.0},
                 "maxEvaluations": 2,
-                "parallelWorkers": 1,
                 "parallelBackend": "threading",
                 "useFixedRoiSubset": True,
             },
@@ -163,7 +166,6 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
                     "watershed_compactness": 0.2,
                     "post_resplit_mult": 0.6,
                 },
-                "nativeThreads": 1,
             },
         )
         n_nuclei = int(nuclei["summary"]["nNuclei"])
@@ -176,7 +178,6 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
                 "cellTypes": cell_types(),
                 "parameters": {"r_voronoi_um": 3.0, "r_buffer_um": 2.0, "r_vote_um": 3.0},
                 "maxEvaluations": 2,
-                "parallelWorkers": 1,
                 "parallelBackend": "threading",
                 "useFixedRoiSubset": True,
             },
@@ -202,8 +203,6 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
                     "ambiguous_min_probability": 0.55,
                     "ambiguous_min_gap": 0.05,
                 },
-                "nativeThreads": 1,
-                "supportWorkers": 1,
             },
         )
         resolved_types = [name for name in assignment["summary"]["cellCounts"] if name not in {"Unassigned", "Ambiguous"}]
@@ -245,12 +244,342 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
         if "data:image" in serialized_outputs or "base64" in serialized_outputs.lower():
             raise AssertionError("Native engine protocol contains an embedded data payload.")
 
+        nuclei_grid = json.loads((output_folder / "02_nuclei_segmentation" / "nuclei_native_optimizer_grid.json").read_text(encoding="utf-8"))
+        assignment_grid = json.loads((output_folder / "04_cell_type_assignment_parameters" / "celltype_assignment_native_optimizer_grid.json").read_text(encoding="utf-8"))
+        expected_optimizer_workers = min(expected_cpu_count, 2)
+        if int(nuclei_grid["parallel_config"]["parallel_workers"]) != expected_optimizer_workers:
+            raise AssertionError("Nuclei optimizer did not default to the all-core worker budget.")
+        if int(assignment_grid["parallel_config"]["parallel_workers"]) != expected_optimizer_workers:
+            raise AssertionError("Assignment optimizer did not default to the all-core worker budget.")
+
+        workflow_state_path = output_folder / "00_config" / "windows_session_state.json"
+        workflow_before_screening = json.loads(workflow_state_path.read_text(encoding="utf-8"))["stages"]
+        engine.request(
+            "nuclei_optimizer",
+            {
+                "parameters": {"nucleus_channel": "DAPI", "min_diam_um": 6.0, "max_diam_um": 16.0},
+                "maxEvaluations": 1,
+                "parallelBackend": "threading",
+                "useFixedRoiSubset": True,
+            },
+        )
+        engine.request(
+            "celltype_optimizer",
+            {
+                "cellTypes": cell_types(),
+                "parameters": {"r_voronoi_um": 3.0, "r_buffer_um": 2.0, "r_vote_um": 3.0},
+                "maxEvaluations": 1,
+                "parallelBackend": "threading",
+                "useFixedRoiSubset": True,
+            },
+        )
+        workflow_after_screening = json.loads(workflow_state_path.read_text(encoding="utf-8"))["stages"]
+        if workflow_after_screening != workflow_before_screening or not all(workflow_after_screening.values()):
+            raise AssertionError(
+                "Parameter screening changed completed workflow history before explicit Apply: "
+                f"before={workflow_before_screening}, after={workflow_after_screening}"
+            )
+
+        for required in (
+            output_folder / "02_nuclei_segmentation" / "nuclei_native_optimizer_recommendation.json",
+            output_folder / "04_cell_type_assignment_parameters" / "celltype_assignment_native_optimizer_recommendation.json",
+            output_folder / "05_cell_type_assignment" / "celltype_assignment_params.json",
+        ):
+            if not required.is_file():
+                raise AssertionError(f"Missing resumable session state: {required}")
+
+        restored_engine = EngineProcess(engine_command)
+        try:
+            restored = restored_engine.request("restore", {"outputFolder": str(output_folder)})
+            if not restored.get("restored"):
+                raise AssertionError("A fresh engine did not recognize the completed output folder.")
+            if not all(bool(restored["workflow"].get(key)) for key in (
+                "inputs", "overlay", "nuclei", "cellTypes", "neighborhood", "region", "distribution", "distance", "outputs"
+            )):
+                raise AssertionError(f"Restored workflow is incomplete: {restored['workflow']}")
+            if not restored.get("nucleiRecommendation") or not restored.get("assignmentRecommendation"):
+                raise AssertionError("Optimizer recommendations were not restored.")
+            if len(restored.get("files", [])) < 12:
+                raise AssertionError("Restored output manifest is unexpectedly small.")
+            restored_distance = restored_engine.request(
+                "distance",
+                {"mode": "nearest", "targetType": resolved_types[0], "queryTypes": resolved_types[1:]},
+            )
+            if not restored_distance.get("artifacts"):
+                raise AssertionError("A downstream workflow could not run from restored state.")
+            restored_outputs = restored_engine.request("outputs", {})
+            if len(restored_outputs.get("files", [])) < 12:
+                raise AssertionError("Restored workflow could not refresh its final output manifest.")
+        finally:
+            restored_engine.close()
+
+        with tempfile.TemporaryDirectory(prefix="spatialscope-history-guards-") as guard_value:
+            guard_root = Path(guard_value)
+
+            changed_definition_output = guard_root / "changed-definition"
+            shutil.copytree(output_folder, changed_definition_output)
+            changed_definitions = cell_types()
+            changed_definitions[0] = {**changed_definitions[0], "color_hex": "#112233"}
+            changed_engine = EngineProcess(engine_command)
+            try:
+                changed_restore = changed_engine.request(
+                    "restore",
+                    {"outputFolder": str(changed_definition_output)},
+                )
+                if not all(changed_restore["workflow"].values()):
+                    raise AssertionError("Definition-change guard could not restore the completed source history.")
+                changed_optimizer = changed_engine.request(
+                    "celltype_optimizer",
+                    {
+                        "cellTypes": changed_definitions,
+                        "parameters": {"r_voronoi_um": 3.0, "r_buffer_um": 2.0, "r_vote_um": 3.0},
+                        "maxEvaluations": 1,
+                        "parallelBackend": "threading",
+                        "useFixedRoiSubset": True,
+                    },
+                )
+                if not changed_optimizer["recommendedParameters"]:
+                    raise AssertionError("Changed-definition optimizer did not return a recommendation.")
+                changed_state = json.loads(
+                    (changed_definition_output / "00_config" / "windows_session_state.json").read_text(encoding="utf-8")
+                )
+                expected_preserved = {"inputs", "overlay", "nuclei"}
+                if any(
+                    bool(value) != (stage in expected_preserved)
+                    for stage, value in changed_state["stages"].items()
+                ):
+                    raise AssertionError(
+                        "Changed cell type definitions did not invalidate the old assignment history: "
+                        f"{changed_state['stages']}"
+                    )
+                if not changed_state.get("recommendations", {}).get("assignment"):
+                    raise AssertionError("Changed-definition recommendation was not persisted.")
+                try:
+                    changed_engine.request("neighborhood", {"gridSizeUm": 24.0})
+                except RuntimeError as error:
+                    if "Run cell type assignment" not in str(error):
+                        raise AssertionError(f"Changed-definition guard failed for the wrong reason: {error}") from error
+                else:
+                    raise AssertionError("Changed definitions left stale assignment data usable in engine memory.")
+            finally:
+                changed_engine.close()
+
+            if not (changed_definition_output / "05_cell_type_assignment" / "cells_summary.csv").is_file():
+                raise AssertionError("Changed-definition guard did not retain a stale assignment artifact to test filtering.")
+            changed_restore_engine = EngineProcess(engine_command)
+            try:
+                changed_restored = changed_restore_engine.request(
+                    "restore",
+                    {"outputFolder": str(changed_definition_output)},
+                )
+                if any(
+                    bool(changed_restored["workflow"].get(stage)) != (stage in {"inputs", "overlay", "nuclei"})
+                    for stage in changed_restored["workflow"]
+                ):
+                    raise AssertionError(
+                        "Changed-definition restore exposed invalidated workflow stages: "
+                        f"{changed_restored['workflow']}"
+                    )
+                if changed_restored.get("resolvedCellTypes") or changed_restored.get("boundaries"):
+                    raise AssertionError("Changed-definition restore exposed stale assignment-derived results.")
+                if changed_restored.get("assignmentParameters"):
+                    raise AssertionError("Changed-definition restore exposed stale final assignment parameters.")
+                stale_preview_keys = {"cellTypes", "neighborhood", "region", "distribution", "distance_nearest", "distance_boundary"}
+                if stale_preview_keys.intersection(changed_restored.get("previewPaths", {})):
+                    raise AssertionError("Changed-definition restore exposed stale final previews.")
+                stale_subdirs = {
+                    "05_cell_type_assignment",
+                    "06_neighborhood_analysis",
+                    "07_region_analysis",
+                    "08_integrated_region_analysis",
+                    "09_cell_distribution_analysis",
+                    "10_distance_analysis",
+                }
+                returned_tops = {
+                    str(record.get("relative_path") or "").replace("\\", "/").split("/", 1)[0]
+                    for record in changed_restored.get("files", [])
+                }
+                if returned_tops.intersection(stale_subdirs):
+                    raise AssertionError(f"Changed-definition restore listed stale final artifacts: {returned_tops}")
+            finally:
+                changed_restore_engine.close()
+
+            nuclei_apply_output = guard_root / "nuclei-apply"
+            shutil.copytree(output_folder, nuclei_apply_output)
+            nuclei_apply_engine = EngineProcess(engine_command)
+            try:
+                nuclei_apply_restore = nuclei_apply_engine.request(
+                    "restore",
+                    {"outputFolder": str(nuclei_apply_output)},
+                )
+                nuclei_recommendation = dict(nuclei_apply_restore["nucleiRecommendation"])
+                applied_nuclei_parameters = {"nucleus_channel": "DAPI", **nuclei_recommendation}
+                applied_nuclei = nuclei_apply_engine.request(
+                    "apply_recommendation",
+                    {"kind": "nuclei", "parameters": applied_nuclei_parameters},
+                )
+                if any(
+                    bool(applied_nuclei["workflow"].get(stage)) != (stage in {"inputs", "overlay"})
+                    for stage in applied_nuclei["workflow"]
+                ):
+                    raise AssertionError(f"Applying nuclei parameters did not invalidate downstream stages: {applied_nuclei['workflow']}")
+                try:
+                    nuclei_apply_engine.request("outputs", {})
+                except RuntimeError as error:
+                    if "Complete all analysis steps" not in str(error):
+                        raise AssertionError(f"Incomplete outputs guard failed for the wrong reason: {error}") from error
+                else:
+                    raise AssertionError("Outputs accepted a workflow invalidated by applied nuclei parameters.")
+            finally:
+                nuclei_apply_engine.close()
+
+            nuclei_apply_restore_engine = EngineProcess(engine_command)
+            try:
+                nuclei_applied_restore = nuclei_apply_restore_engine.request(
+                    "restore",
+                    {"outputFolder": str(nuclei_apply_output)},
+                )
+                if nuclei_applied_restore.get("nucleiRecommendation") or nuclei_applied_restore.get("assignmentRecommendation"):
+                    raise AssertionError("Applied nuclei recommendation remained pending after restart.")
+                for key, expected in applied_nuclei_parameters.items():
+                    actual = nuclei_applied_restore["nucleiParameters"].get(key)
+                    if actual != expected:
+                        raise AssertionError(f"Applied nuclei parameter was not restored: {key}={actual!r}, expected {expected!r}")
+                if set(nuclei_applied_restore.get("previewPaths", {})) - {"overlay", "split"}:
+                    raise AssertionError("Applied nuclei parameters exposed stale downstream previews after restart.")
+            finally:
+                nuclei_apply_restore_engine.close()
+
+            assignment_apply_output = guard_root / "assignment-apply"
+            shutil.copytree(output_folder, assignment_apply_output)
+            assignment_apply_engine = EngineProcess(engine_command)
+            try:
+                assignment_apply_restore = assignment_apply_engine.request(
+                    "restore",
+                    {"outputFolder": str(assignment_apply_output)},
+                )
+                assignment_recommendation = dict(assignment_apply_restore["assignmentRecommendation"])
+                applied_assignment_parameters = dict(assignment_apply_restore["assignmentParameters"])
+                applied_assignment_parameters.update(assignment_recommendation)
+                applied_assignment = assignment_apply_engine.request(
+                    "apply_recommendation",
+                    {"kind": "assignment", "parameters": applied_assignment_parameters},
+                )
+                if any(
+                    bool(applied_assignment["workflow"].get(stage)) != (stage in {"inputs", "overlay", "nuclei"})
+                    for stage in applied_assignment["workflow"]
+                ):
+                    raise AssertionError(
+                        "Applying assignment parameters did not invalidate downstream stages: "
+                        f"{applied_assignment['workflow']}"
+                    )
+            finally:
+                assignment_apply_engine.close()
+
+            assignment_apply_restore_engine = EngineProcess(engine_command)
+            try:
+                assignment_applied_restore = assignment_apply_restore_engine.request(
+                    "restore",
+                    {"outputFolder": str(assignment_apply_output)},
+                )
+                if assignment_applied_restore.get("assignmentRecommendation"):
+                    raise AssertionError("Applied assignment recommendation remained pending after restart.")
+                for key, expected in applied_assignment_parameters.items():
+                    actual = assignment_applied_restore["assignmentParameters"].get(key)
+                    if actual != expected:
+                        raise AssertionError(f"Applied assignment parameter was not restored: {key}={actual!r}, expected {expected!r}")
+                if not assignment_applied_restore.get("cellTypes"):
+                    raise AssertionError("Applied assignment parameters lost the saved cell type definitions.")
+                if assignment_applied_restore.get("resolvedCellTypes") or assignment_applied_restore.get("boundaries"):
+                    raise AssertionError("Applied assignment parameters exposed stale assignment-derived results.")
+            finally:
+                assignment_apply_restore_engine.close()
+
+            reconfigured_output = guard_root / "reconfigured"
+            shutil.copytree(output_folder, reconfigured_output)
+            if not (reconfigured_output / "05_cell_type_assignment" / "cells_summary.csv").is_file():
+                raise AssertionError("Reconfigure guard did not retain a stale assignment artifact to test filtering.")
+            configure_engine = EngineProcess(engine_command)
+            try:
+                configure_engine.request(
+                    "configure",
+                    {
+                        "inputFolder": str(input_folder),
+                        "outputFolder": str(reconfigured_output),
+                        "pixelSizeUm": [1.25, 1.25],
+                        "imageId": "NativeSmokeReconfigured",
+                        "whiteChannel": "DAPI",
+                        "whiteWeight": 0.25,
+                    },
+                )
+                try:
+                    configure_engine.request("outputs", {})
+                except RuntimeError as error:
+                    if "Complete all analysis steps" not in str(error):
+                        raise AssertionError(f"Reconfigured outputs guard failed for the wrong reason: {error}") from error
+                else:
+                    raise AssertionError("Outputs accepted an incomplete reconfigured workflow.")
+                configured_state = json.loads(
+                    (reconfigured_output / "00_config" / "windows_session_state.json").read_text(encoding="utf-8")
+                )
+                expected_configured_state = {
+                    stage: stage == "inputs"
+                    for stage in configured_state["stages"]
+                }
+                if configured_state["stages"] != expected_configured_state:
+                    raise AssertionError(f"Rejected outputs corrupted workflow history: {configured_state['stages']}")
+            finally:
+                configure_engine.close()
+
+            reconfigured_engine = EngineProcess(engine_command)
+            try:
+                reconfigured = reconfigured_engine.request(
+                    "restore",
+                    {"outputFolder": str(reconfigured_output)},
+                )
+                expected_reconfigured = {stage: stage == "inputs" for stage in reconfigured["workflow"]}
+                if reconfigured["workflow"] != expected_reconfigured:
+                    raise AssertionError(
+                        "Reconfigured output mixed stale workflow history into the new session: "
+                        f"{reconfigured['workflow']}"
+                    )
+                for key in (
+                    "previewPaths",
+                    "nucleiParameters",
+                    "assignmentParameters",
+                    "nucleiRecommendation",
+                    "assignmentRecommendation",
+                    "cellTypes",
+                    "resolvedCellTypes",
+                    "boundaries",
+                ):
+                    if reconfigured.get(key):
+                        raise AssertionError(f"Reconfigured output exposed stale {key}: {reconfigured[key]}")
+                returned_file_tops = {
+                    str(record.get("relative_path") or "").replace("\\", "/").split("/", 1)[0]
+                    for record in reconfigured.get("files", [])
+                }
+                returned_artifact_tops = {
+                    str(record.get("relativePath") or "").replace("\\", "/").split("/", 1)[0]
+                    for record in reconfigured.get("artifacts", [])
+                }
+                if returned_file_tops != {"00_config"} or returned_artifact_tops != {"00_config"}:
+                    raise AssertionError(
+                        "Reconfigured output listed stale analysis files: "
+                        f"files={returned_file_tops}, artifacts={returned_artifact_tops}"
+                    )
+            finally:
+                reconfigured_engine.close()
+
         report = {
             "status": "passed",
             "n_nuclei": n_nuclei,
             "resolved_cell_types": resolved_types,
             "neighborhood_clusters": neighborhood["summary"]["clusterCount"],
-            "optimizer_checks": 2,
+            "optimizer_checks": 5,
+            "restore_checks": 5,
+            "apply_checks": 2,
+            "output_guard_checks": 2,
             "output_files": len(outputs["files"]),
             "max_protocol_line_bytes": engine.max_protocol_line_bytes,
             "output_folder": str(output_folder),
