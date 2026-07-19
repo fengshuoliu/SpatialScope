@@ -11,6 +11,8 @@ xcuserdata/
 __pycache__/
 *.pyc
 .venv/
+node_modules/
+windows/desktop/dist/
 release-assets/
 design-qa/
 design-qa.md

@@ -1,0 +1,78 @@
+{
+  "name": "spatialscope-windows",
+  "version": "1.2.0",
+  "description": "SpatialScope desktop application for Windows",
+  "main": "main.js",
+  "author": "Fengshuo Liu",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win --x64",
+    "dist:dir": "electron-builder --win --x64 --dir"
+  },
+  "dependencies": {
+    "electron-log": "5.4.4",
+    "electron-updater": "6.8.9"
+  },
+  "devDependencies": {
+    "electron": "43.1.1",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.fengshuoliu.SpatialScope",
+    "productName": "SpatialScope",
+    "electronUpdaterCompatibility": ">=2.16",
+    "asar": true,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "loading.html",
+      "assets/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../build/SpatialScopeBackend",
+        "to": "backend/SpatialScopeBackend"
+      }
+    ],
+    "win": {
+      "icon": "assets/SpatialScope.ico",
+      "verifyUpdateCodeSignature": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "nsis": {
+      "artifactName": "SpatialScope-Windows-x64-Setup-${version}.${ext}",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "SpatialScope",
+      "uninstallDisplayName": "SpatialScope"
+    },
+    "portable": {
+      "artifactName": "SpatialScope-Windows-x64-Portable-${version}.${ext}"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "fengshuoliu",
+        "repo": "SpatialScope",
+        "releaseType": "release"
+      }
+    ]
+  }
+}

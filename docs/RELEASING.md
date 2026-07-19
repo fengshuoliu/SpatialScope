@@ -1,9 +1,10 @@
 # Release SpatialScope Through GitHub
 
-This project distributes ad-hoc-signed macOS builds through GitHub Releases and
-uses Sparkle for in-app updates. An Apple Developer Program membership is not
-required for this workflow. Users must approve the app once through macOS
-Privacy & Security because the build is not Apple-notarized.
+This project distributes ad-hoc-signed macOS builds and unsigned Windows x64
+builds through GitHub Releases. macOS updates use Sparkle; installed Windows
+copies use `electron-updater` with NSIS metadata. Apple Developer Program and
+commercial Windows code-signing memberships are not required. Users approve the
+app once through macOS Privacy & Security or Windows SmartScreen.
 
 ## One-time setup
 
@@ -23,13 +24,18 @@ Privacy & Security because the build is not Apple-notarized.
    SpatialScope-macOS-universal.dmg
    SpatialScope-macOS-universal.zip
    SHA256SUMS.txt
+   SpatialScope-Windows-x64-Setup-<version>.exe
+   SpatialScope-Windows-x64-Setup-<version>.exe.blockmap
+   SpatialScope-Windows-x64-Portable-<version>.exe
+   latest.yml
+   SHA256SUMS-Windows.txt
    ```
 
 ## Prepare a release
 
-1. In Xcode, increase both the marketing version and build number. For example,
-   release 1.1 can use marketing version `1.1` and build number `2`. Every Sparkle
-   release must have a build number greater than the previous release.
+1. Increase the Xcode marketing version and build number, and set the same
+   semantic version in `windows/desktop/package.json`. Every Sparkle build number
+   and every Windows semantic version must be greater than the previous release.
 2. Add the release date and user-facing changes to `CHANGELOG.md`.
 3. Build the self-contained universal artifacts:
 
@@ -42,6 +48,10 @@ Privacy & Security because the build is not Apple-notarized.
 5. Test the DMG on a second Mac or a clean macOS user account. Verify first-launch
    approval, one representative analysis, export creation, and the Check for
    Updates menu item.
+6. Push the release branch and wait for the Windows workflow to pass. Download the
+   `SpatialScope-Windows-x64` workflow artifact, which contains the NSIS installer,
+   portable executable, blockmap, `latest.yml`, and checksum file. The workflow
+   runs the complete synthetic nine-stage analysis before packaging.
 
 ## Generate the Sparkle feed
 
@@ -51,7 +61,7 @@ tool from Xcode's resolved package artifacts:
 
 ```bash
 SPARKLE_BIN="build/DerivedData-Release/SourcePackages/artifacts/sparkle/Sparkle/bin"
-RELEASE_DIR="build/release/v1.1"
+RELEASE_DIR="build/release/v1.2"
 APPCAST_WORK="$(mktemp -d /tmp/spatialscope-appcast.XXXXXX)"
 
 ditto --noextattr --norsrc \
@@ -61,7 +71,7 @@ ditto --noextattr --norsrc CHANGELOG.md \
   "$APPCAST_WORK/SpatialScope-macOS-universal.md"
 
 "$SPARKLE_BIN/generate_appcast" \
-  --download-url-prefix "https://github.com/fengshuoliu/SpatialScope/releases/download/v1.1/" \
+  --download-url-prefix "https://github.com/fengshuoliu/SpatialScope/releases/download/v1.2/" \
   --link "https://fengshuoliu.github.io/SpatialScope/" \
   --embed-release-notes \
   -o "$APPCAST_WORK/appcast.xml" \
@@ -70,7 +80,7 @@ ditto --noextattr --norsrc CHANGELOG.md \
 ditto --noextattr --norsrc "$APPCAST_WORK/appcast.xml" docs/appcast.xml
 ```
 
-Replace `1.1` with the new version in both places. Approve Keychain access when
+Replace `1.2` with the new version in both places. Approve Keychain access when
 macOS asks. Never use `generate_keys` again unless intentionally rotating the
 update key; replacing the key would prevent existing installations from trusting
 new releases.
@@ -82,8 +92,10 @@ build number, GitHub asset URL, minimum macOS version, file length, and
 ## Publish on GitHub
 
 1. Commit and push the version, changelog, and source changes.
-2. Create a GitHub release tagged `v<version>` and upload all three files from
-   `build/release/v<version>/`.
+2. Create a GitHub release tagged `v<version>`. Upload the three macOS files from
+   `build/release/v<version>/` and all files from the downloaded Windows workflow
+   artifact. Keep `latest.yml` at the top level of the release assets so installed
+   Windows copies can discover updates.
 3. Publish the release and verify that the DMG and ZIP download successfully.
 4. Commit and push `docs/appcast.xml` only after the release assets are live.
 5. Wait for GitHub Pages to deploy, then open:

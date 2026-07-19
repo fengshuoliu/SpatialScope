@@ -1,9 +1,9 @@
 # SpatialScope User Manual
 
-**Applies to:** SpatialScope for macOS<br>
+**Applies to:** SpatialScope 1.2 for macOS and Windows<br>
 **Workflow:** image preparation → aligned channel CSV files → composite preview → nuclei → cell types → neighborhoods → regions → distribution → distances → exports
 
-> The screenshots show an example 16-channel dataset. Marker names, colors, cell types, counts, and results will vary by dataset.
+> The screenshots show the macOS interface with an example 16-channel dataset. Windows uses the same nine-stage analysis workflow and output contracts in a desktop web-style layout, so control placement differs slightly. Marker names, colors, cell types, counts, and results will vary by dataset.
 
 ## Contents
 
@@ -66,8 +66,8 @@ The intended in-app order is left to right in the sidebar. You can open any step
 
 ### 2.1 System requirements
 
-- macOS 13 or later.
-- A packaged SpatialScope `.app`, or Xcode and the SpatialScope source project.
+- macOS 13 or later on Apple Silicon or Intel, or 64-bit Windows 10 or 11.
+- A packaged SpatialScope `.app`, Windows installer, or Windows portable executable.
 - Enough RAM for all selected channel matrices and intermediate masks. Memory use grows with image width × image height × number of channels.
 - Write permission for the selected output folder.
 
@@ -164,7 +164,7 @@ Selecting a different, empty output folder clears the overlay previews but does 
 
 ### 3.1 Launch a packaged app
 
-Open `SpatialScope.app` in Finder. If macOS displays a security warning for an unsigned development build, follow your organization’s approved installation procedure.
+On macOS, open `SpatialScope.app` in Finder. On Windows, open SpatialScope from the Start menu or launch the portable executable. Follow the [installation guide](INSTALLATION.md) if Gatekeeper or Windows SmartScreen requests first-launch approval.
 
 ### 3.2 Launch from the source repository
 
@@ -175,6 +175,8 @@ From the repository root:
 ```
 
 Alternatively, open the SpatialScope Xcode project, select the SpatialScope scheme, and run the macOS target.
+
+On Windows, run `./windows/build_release.ps1` from PowerShell to test the complete analysis pipeline and build the installer and portable executable.
 
 ### 3.3 Main interface
 
@@ -195,9 +197,9 @@ The sidebar status is a convenience indicator, not a validation guarantee. For e
 ### 3.4 Useful interface behavior
 
 - Click any sidebar step to open it.
-- Use the sidebar **Language/语言** control to follow the macOS system language or explicitly select English or Simplified Chinese. The preference changes UI text only; it does not change the `SpatialScope` name or any exported data, filenames, schemas, analysis parameters, or generated figures.
-- Use **Command-O** to choose an input folder.
-- Use **Command-R** to generate the overlay.
+- Use the sidebar **Language/语言** control to follow the operating-system language or explicitly select English or Simplified Chinese. The preference changes UI text only; it does not change the `SpatialScope` name or any exported data, filenames, schemas, analysis parameters, or generated figures.
+- Use **Command-O** on macOS or **Ctrl-O** on Windows to choose an input folder.
+- On macOS, use **Command-R** to generate the overlay. On Windows, select the overlay command in Step 2.
 - Image previews can be scrolled when zoomed.
 - Pinch to zoom from approximately 0.08× to 16×.
 - Double-click an image preview to reset it to fit.
@@ -738,7 +740,7 @@ Step 7 has three tabs: **Region masks**, **Cell density**, and **Cell cluster di
 
 ### 11.1 Cell Distribution runtime
 
-The distributed macOS application includes a self-contained Cell Distribution helper for Apple Silicon and Intel Macs. It bundles the required Python runtime and scientific libraries; users do not need a separate Python installation or the legacy TME Spatial project.
+The distributed macOS and Windows applications include a self-contained Cell Distribution runtime. It bundles the required Python runtime and scientific libraries; users do not need a separate Python installation or the legacy TME Spatial project.
 
 Developers rebuilding SpatialScope from source create these helpers with `script/build_cell_distribution_runtime.sh`. The release package script places both architecture-specific helpers inside the application bundle and the app selects the native helper at runtime.
 
