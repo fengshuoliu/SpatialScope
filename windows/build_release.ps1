@@ -15,6 +15,7 @@ $BackendDist = Join-Path $BuildRoot "SpatialScopeBackend"
 $PyInstallerWork = Join-Path $BuildRoot "pyinstaller-work"
 $SmokeRoot = Join-Path $BuildRoot "smoke-output"
 $BackendSmokeRoot = Join-Path $BuildRoot "backend-smoke"
+$BackendHealthRoot = Join-Path $BuildRoot "backend-health"
 
 function Assert-NativeSuccess([string]$Operation) {
     if ($LASTEXITCODE -ne 0) {
@@ -70,6 +71,51 @@ try {
         --smoke-test
     Assert-NativeSuccess "frozen backend smoke test"
 
+    New-Item -ItemType Directory -Force $BackendHealthRoot | Out-Null
+    $BackendHealthPort = 18769
+    $BackendHealthProcess = Start-Process `
+        -FilePath $BackendExe `
+        -ArgumentList @(
+            "--port", $BackendHealthPort,
+            "--session-root", (Join-Path $BackendHealthRoot "sessions"),
+            "--settings-path", (Join-Path $BackendHealthRoot "settings.json"),
+            "--desktop-paths-path", (Join-Path $BackendHealthRoot "desktop-paths.json"),
+            "--system-language", "en"
+        ) `
+        -PassThru
+    try {
+        $BackendHealthy = $false
+        $BackendHealthDeadline = (Get-Date).AddSeconds(120)
+        while ((Get-Date) -lt $BackendHealthDeadline) {
+            if ($BackendHealthProcess.HasExited) {
+                throw "Frozen backend exited during the packaged startup check with code $($BackendHealthProcess.ExitCode)"
+            }
+            try {
+                $HealthResponse = Invoke-WebRequest `
+                    -Uri "http://127.0.0.1:$BackendHealthPort/_stcore/health" `
+                    -UseBasicParsing `
+                    -TimeoutSec 2
+                if ($HealthResponse.StatusCode -eq 200) {
+                    $BackendHealthy = $true
+                    break
+                }
+            }
+            catch {
+                Start-Sleep -Milliseconds 500
+            }
+        }
+        if (-not $BackendHealthy) {
+            throw "Frozen backend did not become healthy within 120 seconds"
+        }
+        Write-Host "Frozen backend packaged startup check passed"
+    }
+    finally {
+        if (-not $BackendHealthProcess.HasExited) {
+            Stop-Process -Id $BackendHealthProcess.Id -Force
+            Wait-Process -Id $BackendHealthProcess.Id -ErrorAction SilentlyContinue
+        }
+    }
+
     Push-Location $DesktopRoot
     try {
         if (-not $SkipDependencies) {
@@ -99,7 +145,11 @@ try {
         $Hash = (Get-FileHash -Algorithm SHA256 $ArtifactPath).Hash.ToLowerInvariant()
         "$Hash  $(Split-Path -Leaf $ArtifactPath)"
     }
-    Set-Content -Path $HashPath -Value $HashLines -Encoding ascii
+    [System.IO.File]::WriteAllText(
+        $HashPath,
+        (($HashLines -join "`n") + "`n"),
+        [System.Text.Encoding]::ASCII
+    )
 
     Write-Host "SpatialScope Windows $Version is ready in $DesktopDist"
 }
