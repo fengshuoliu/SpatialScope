@@ -10,6 +10,8 @@ SpatialScope is a desktop application for spatial image analysis from aligned, p
 
 [Download SpatialScope 2.0.0 for Windows](https://github.com/fengshuoliu/SpatialScope/releases/download/windows-v2.0.0/SpatialScope-Windows-x64-Portable-2.0.0.zip)
 
+> **Windows users:** version 2.0 is a portable ZIP and never opens Streamlit. If you installed an `.exe` under `C:\Program Files\SpatialScope` or see a window titled **Streamlit**, that is the retired Windows 1.2.0 build. Uninstall it and use the 2.0 ZIP linked above.
+
 SpatialScope 1.2.1 for macOS supports macOS 13 or later on Apple Silicon and Intel Macs. SpatialScope 2.0.0 for Windows supports 64-bit Windows 10 and 11. These independently distributed builds are not notarized by Apple or signed with a commercial Windows certificate, so follow the one-time approval steps in the [installation guide](docs/INSTALLATION.md).
 
 ## Documentation

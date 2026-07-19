@@ -22,6 +22,8 @@ Keep the extracted `engine` folder beside `SpatialScope.exe`; moving only the ex
 
 The native Windows package does not run an installer or create Start-menu and desktop shortcuts. Create a shortcut to `SpatialScope.exe` manually if desired.
 
+If Windows lists an installed SpatialScope application under `C:\Program Files\SpatialScope`, or the application opens a window titled **Streamlit**, remove that retired 1.2.0 installation from **Settings > Apps > Installed apps**. It is not the native Windows 2.0 application. Then extract a fresh copy of the 2.0 ZIP and run the `SpatialScope.exe` inside that extracted folder.
+
 ### Windows updates
 
 Windows updates are manual. Download the newer Windows portable ZIP from GitHub Releases, close SpatialScope, extract the complete package into a new folder, and run its `SpatialScope.exe`. Keep the previous folder until you have confirmed that the new version opens your data and outputs correctly.
