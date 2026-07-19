@@ -17,6 +17,8 @@
 "Choose Input Folder..." = "选择输入文件夹……";
 "Generate Overlay" = "生成叠加图";
 "Check for Updates..." = "检查更新……";
+"Show SpatialScope" = "显示 SpatialScope";
+"Quit SpatialScope" = "退出 SpatialScope";
 "STEP %lld OF %lld" = "第 %1$lld 步，共 %2$lld 步";
 "Not started" = "未开始";
 "Ready" = "就绪";
@@ -110,8 +112,8 @@
 "Boundary" = "边界";
 "Cells" = "细胞";
 "Nuclei" = "细胞核";
-"Selected combo %lld: %lld nuclei; %@" = "所选组合 %1$lld：%2$lld 个细胞核；%@";
-"Selected combo %lld: %lld unresolved cells; %@" = "所选组合 %1$lld：%2$lld 个未解析细胞；%@";
+"Selected combo %lld: %lld nuclei; %@" = "所选组合 %1$lld：%2$lld 个细胞核；%3$@";
+"Selected combo %lld: %lld unresolved cells; %@" = "所选组合 %1$lld：%2$lld 个未解析细胞；%3$@";
 
 /* Inputs and calibration */
 "Data locations" = "数据位置";
@@ -158,7 +160,7 @@
 "Run Final Nuclei Segmentation" = "运行最终细胞核分割";
 "Final nuclei segmentation" = "最终细胞核分割";
 "Nuclei segmentation" = "细胞核分割";
-"%lld nuclei detected from %@" = "从 %@ 中检测到 %lld 个细胞核";
+"%lld nuclei detected from %@" = "从 %2$@ 中检测到 %1$lld 个细胞核";
 "Final run saves black-background PNG 300dpi, AI, SVG, parameters JSON, and nuclei_summary.csv." = "最终运行会保存黑色背景的 300 dpi PNG、AI、SVG、参数 JSON 和 nuclei_summary.csv。";
 "Fix minimum diameter at %@ um" = "将最小直径固定为 %@ um";
 "Fix maximum diameter at %@ um" = "将最大直径固定为 %@ um";

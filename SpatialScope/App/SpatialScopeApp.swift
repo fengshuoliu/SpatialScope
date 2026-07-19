@@ -3,6 +3,10 @@ import Sparkle
 import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.regular)
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
@@ -223,6 +227,16 @@ struct SpatialScopeApp: App {
                 .disabled(!store.canGenerateOverlay)
             }
         }
+
+        MenuBarExtra {
+            SpatialScopeMenuBarView(
+                updater: updaterController.updater,
+                language: store.uiLanguage
+            )
+        } label: {
+            SpatialScopeMenuBarIcon()
+        }
+        .menuBarExtraStyle(.menu)
     }
 
     private static func smokeCPUAllocationPercent() -> Double {
@@ -243,5 +257,55 @@ struct SpatialScopeApp: App {
             }
         }
         return 160
+    }
+}
+
+private struct SpatialScopeMenuBarIcon: View {
+    private let image: NSImage
+
+    init() {
+        let size = NSSize(width: 18, height: 18)
+        let source = NSApplication.shared.applicationIconImage ?? NSImage(size: size)
+        image = NSImage(size: size, flipped: false) { rect in
+            NSGraphicsContext.current?.imageInterpolation = .high
+            source.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+            return true
+        }
+    }
+
+    var body: some View {
+        Image(nsImage: image)
+            .accessibilityLabel("SpatialScope")
+    }
+}
+
+private struct SpatialScopeMenuBarView: View {
+    @Environment(\.openWindow) private var openWindow
+
+    let updater: SPUUpdater
+    let language: AppLanguage
+
+    var body: some View {
+        Button(language.localized("Show SpatialScope")) {
+            showMainWindow()
+        }
+
+        CheckForUpdatesView(updater: updater, language: language)
+
+        Divider()
+
+        Button(language.localized("Quit SpatialScope")) {
+            NSApp.terminate(nil)
+        }
+    }
+
+    private func showMainWindow() {
+        NSApp.setActivationPolicy(.regular)
+        if let window = NSApp.windows.first(where: { $0.title == "SpatialScope" && $0.canBecomeMain }) {
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            openWindow(id: "main")
+        }
+        NSApp.activate(ignoringOtherApps: true)
     }
 }

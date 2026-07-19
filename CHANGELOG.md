@@ -2,6 +2,12 @@
 
 All notable changes to SpatialScope are documented here.
 
+## 1.2.1 - 2026-07-19
+
+- Fixed the Simplified Chinese nuclei segmentation result message that could crash the app when a saved result was opened.
+- Added a compact SpatialScope menu bar item for showing the app, checking for updates, and quitting.
+- Kept the workflow sidebar anchored while switching between analysis sections.
+
 ## 1.2 - 2026-07-18
 
 - Added the first Windows x64 release with both an NSIS installer and portable executable.

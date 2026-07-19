@@ -63,24 +63,28 @@ struct SidebarView: View {
             .padding(.top, 20)
             .padding(.bottom, 14)
 
-            List {
-                ForEach(Array(AnalysisSection.allCases.enumerated()), id: \.element.id) { index, section in
-                    let status = workflowStatus(for: section, store: store)
-                    SidebarRow(
-                        index: index + 1,
-                        section: section,
-                        isSelected: store.selectedSection == section,
-                        status: status
-                    )
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        store.selectedSection = section
+            ScrollView(.vertical) {
+                LazyVStack(spacing: 0) {
+                    ForEach(Array(AnalysisSection.allCases.enumerated()), id: \.element.id) { index, section in
+                        let status = workflowStatus(for: section, store: store)
+                        Button {
+                            store.selectedSection = section
+                        } label: {
+                            SidebarRow(
+                                index: index + 1,
+                                section: section,
+                                isSelected: store.selectedSection == section,
+                                status: status
+                            )
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
                     }
-                    .listRowInsets(EdgeInsets(top: 4, leading: 10, bottom: 4, trailing: 10))
-                    .listRowBackground(Color.clear)
                 }
             }
-            .listStyle(.sidebar)
 
             Divider()
 
@@ -173,6 +177,7 @@ private struct SidebarRow: View {
         }
         .padding(.horizontal, 11)
         .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background {
             if !isSelected {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
