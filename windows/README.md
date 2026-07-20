@@ -64,10 +64,10 @@ Run the focused CPU/OpenCL parity suite with:
 After source testing, create and validate the self-contained Windows package:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\windows\build_native.ps1 -FullSmoke
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\windows\build_native.ps1 -FullSmoke -RequireGpuParity
 ```
 
-Once dependencies are already installed, add `-SkipDependencies` to save time. The build checks the frozen Matplotlib renderer and runs Step 2 against the frozen engine. With `-FullSmoke`, it also runs all nine workflow stages and exact CPU-versus-required-OpenCL parity against the staged frozen engine, so a compatible OpenCL GPU is required for a full release build. It then writes:
+Once dependencies are already installed, add `-SkipDependencies` to save time. The build checks the frozen Matplotlib renderer and runs Step 2 against the frozen engine. `-FullSmoke` runs all nine workflow stages; adding `-RequireGpuParity` also runs exact CPU-versus-required-OpenCL parity against the staged frozen engine, so that release-only gate requires a compatible OpenCL GPU. GPU-less CI can retain the complete CPU workflow smoke by using `-FullSmoke` alone. The build then writes:
 
 - `native/dist/SpatialScope-Windows-x64-Setup.exe`
 - `native/dist/SHA256SUMS-Windows.txt`

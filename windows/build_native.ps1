@@ -1,6 +1,7 @@
 param(
     [switch]$SkipDependencies,
-    [switch]$FullSmoke
+    [switch]$FullSmoke,
+    [switch]$RequireGpuParity
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,6 +23,10 @@ $DistRoot = Join-Path $NativeRoot "dist"
 $InstallerSmokeRoot = Join-Path $BuildRoot "installer-smoke"
 $PythonExe = Join-Path $WindowsRoot ".venv\Scripts\python.exe"
 $SyntheticInput = Join-Path $WindowsRoot "build\smoke-output\synthetic_input"
+
+if ($RequireGpuParity -and -not $FullSmoke) {
+    throw "-RequireGpuParity must be used together with -FullSmoke."
+}
 
 function Assert-Success([string]$Operation) {
     if ($LASTEXITCODE -ne 0) {
@@ -146,22 +151,24 @@ try {
             --output-folder (Join-Path $BuildRoot "staged-full-smoke")
         Assert-Success "staged full scientific workflow smoke test"
 
-        $HadGpuMode = Test-Path -LiteralPath Env:SPATIALSCOPE_GPU_MODE
-        $PreviousGpuMode = $env:SPATIALSCOPE_GPU_MODE
-        try {
-            $env:SPATIALSCOPE_GPU_MODE = "require"
-            & $PythonExe (Join-Path $TestsRoot "native_gpu_parity.py") `
-                --engine-executable $StagedEngine `
-                --input-folder $SyntheticInput `
-                --output-root (Join-Path $BuildRoot "staged-gpu-parity")
-            Assert-Success "staged required-GPU scientific parity test"
-        }
-        finally {
-            if ($HadGpuMode) {
-                $env:SPATIALSCOPE_GPU_MODE = $PreviousGpuMode
+        if ($RequireGpuParity) {
+            $HadGpuMode = Test-Path -LiteralPath Env:SPATIALSCOPE_GPU_MODE
+            $PreviousGpuMode = $env:SPATIALSCOPE_GPU_MODE
+            try {
+                $env:SPATIALSCOPE_GPU_MODE = "require"
+                & $PythonExe (Join-Path $TestsRoot "native_gpu_parity.py") `
+                    --engine-executable $StagedEngine `
+                    --input-folder $SyntheticInput `
+                    --output-root (Join-Path $BuildRoot "staged-gpu-parity")
+                Assert-Success "staged required-GPU scientific parity test"
             }
-            else {
-                Remove-Item -LiteralPath Env:SPATIALSCOPE_GPU_MODE -ErrorAction SilentlyContinue
+            finally {
+                if ($HadGpuMode) {
+                    $env:SPATIALSCOPE_GPU_MODE = $PreviousGpuMode
+                }
+                else {
+                    Remove-Item -LiteralPath Env:SPATIALSCOPE_GPU_MODE -ErrorAction SilentlyContinue
+                }
             }
         }
     }
