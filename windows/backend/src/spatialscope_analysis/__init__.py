@@ -6,6 +6,7 @@ __all__ = [
     "visualization",
     "nuclei_segmentation",
     "celltype_assignment",
+    "optimizer_fixed_parameters",
     "region_analysis",
     "distance_analysis",
 ]

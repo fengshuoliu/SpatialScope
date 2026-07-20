@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sys
 from dataclasses import dataclass
@@ -948,13 +947,13 @@ def run_cell_density_analysis(
 
     output_dirs = _cell_distribution_output_dirs(config)
     density_dir = output_dirs["cell_density"]
-    payload = {
-        "boundary_label": str(boundary_label),
-        "band_width_um": float(band_width_um),
-        "celltypes": list(selected_celltypes),
-    }
-    short_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:12]
-    base_name = f"cell_density__{safe_name(boundary_label, 'boundary')}__{_band_token(float(band_width_um))}um__{short_hash}"
+    # This directory stores the latest density run. Keep the boundary and band
+    # width because they are meaningful to a reader, but do not expose an
+    # implementation hash in every exported filename.
+    base_name = (
+        f"cell_density_by_boundary_distance__{safe_name(boundary_label, 'boundary')}"
+        f"__{_band_token(float(band_width_um))}um"
+    )
 
     csv_band_wide = density_dir / f"{base_name}__wide.csv"
     csv_band_long = density_dir / f"{base_name}__long.csv"
@@ -1321,14 +1320,7 @@ def run_cell_cluster_distribution_analysis(
     cluster_dir = output_dirs["cell_cluster_distribution"]
     for old_output in cluster_dir.glob("cell_cluster_distribution__*"):
         old_output.unlink(missing_ok=True)
-    payload = {
-        "selected_boundaries": list(selected_boundary_labels),
-        "selected_clusters": list(selected_cluster_labels),
-        "grid_size_um": float(neighborhood_result.get("grid_size_um", 20.0) or 20.0),
-        "classification_rule": "majority_overlap_with_center_tie_breaker",
-    }
-    short_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:12]
-    base_name = f"cell_cluster_distribution__{short_hash}"
+    base_name = "neighborhood_clusters_by_region"
 
     csv_cluster_region = cluster_dir / f"{base_name}__cluster_region.csv"
     csv_region = cluster_dir / f"{base_name}__region.csv"

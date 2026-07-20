@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
@@ -494,11 +495,93 @@ def build_region_mask_from_cell_labels(
     return get_compute_runtime().labels_in_set(components, keep_ids).astype(bool, copy=False)
 
 
-def _save_masks_as_uint8(masks: Dict[str, np.ndarray], save_dir: Path, suffix_template: str) -> Dict[str, Path]:
+_INTERNAL_REGION_HASH_RE = re.compile(r"(?i)(?<![0-9a-f])[0-9a-f]{12,16}(?![0-9a-f])")
+_WINDOWS_INVALID_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_WINDOWS_RESERVED_FILENAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
+
+
+def _human_filename_token(text: str, fallback: str = "region", max_length: int = 96) -> str:
+    """Return a readable, Windows-safe filename token while retaining labels such as ``(2)``."""
+
+    value = " ".join(str(text).split())
+    value = _WINDOWS_INVALID_FILENAME_RE.sub(" - ", value)
+    value = re.sub(r"\s+", " ", value).strip(" ._")
+    if not value:
+        value = str(fallback).strip() or "region"
+    if value.split(".", 1)[0].upper() in _WINDOWS_RESERVED_FILENAMES:
+        value = f"Region - {value}"
+    if len(value) > max_length:
+        collision_suffix = re.search(r" \(\d+\)$", value)
+        suffix = collision_suffix.group(0) if collision_suffix else ""
+        keep = max(1, max_length - len(suffix))
+        value = value[:keep].rstrip(" ._") + suffix
+    return value or str(fallback).strip() or "region"
+
+
+def _public_filename_token(text: str, fallback: str) -> str:
+    value = str(text).strip()
+    if not value or _INTERNAL_REGION_HASH_RE.search(value):
+        value = fallback
+    return _human_filename_token(value, fallback)
+
+
+def _save_masks_as_uint8(
+    masks: Dict[str, np.ndarray],
+    save_dir: Path,
+    *,
+    display_names: Dict[str, str] | None = None,
+    filename_stage: str,
+    workflow_name: str,
+) -> Dict[str, Path]:
+    """Save public mask files without leaking internal registry keys into their names."""
+
+    display_names = display_names if isinstance(display_names, dict) else {}
+    stage = _public_filename_token(filename_stage, "region")
+    occupied: Dict[str, Dict[str, Any] | None] = {
+        path.name.casefold(): None for path in save_dir.glob("*_region_mask_uint8.tiff")
+    }
+    for record in _load_boundary_registry(save_dir):
+        basename = Path(str(record.get("mask_path") or "")).name.casefold()
+        if basename:
+            occupied[basename] = record
+
+    allocated: set[str] = set()
     paths: Dict[str, Path] = {}
-    for name, mask in masks.items():
-        path = save_dir / suffix_template.format(name=safe_name(name, "region"))
+    for index, (name, mask) in enumerate(masks.items(), start=1):
+        mask_key = str(name)
+        raw_display_name = str(display_names.get(mask_key, mask_key)).strip()
+        base_token = _public_filename_token(raw_display_name, f"Region {index:03d}")
+        candidate_token = base_token
+        collision_index = 2
+        while True:
+            filename = f"{stage}__{candidate_token}_region_mask_uint8.tiff"
+            filename_key = filename.casefold()
+            existing = occupied.get(filename_key)
+            same_logical_mask = isinstance(existing, dict) and (
+                str(existing.get("source") or "") == str(workflow_name)
+                and str(existing.get("mask_key") or "") == mask_key
+            )
+            if filename_key not in allocated and (filename_key not in occupied or same_logical_mask):
+                break
+            candidate_token = _human_filename_token(
+                f"{base_token} ({collision_index})",
+                f"Region {index:03d} ({collision_index})",
+            )
+            collision_index += 1
+        path = save_dir / filename
         save_uint8_tiff(path, mask.astype(np.uint8))
+        allocated.add(filename_key)
+        occupied[filename_key] = {
+            "source": str(workflow_name),
+            "mask_key": mask_key,
+        }
         paths[name] = path
     return paths
 
@@ -629,12 +712,18 @@ def _save_region_like_outputs(
     use_type_colors: bool = True,
     contour_downsample: int = 1,
     registry_mask_names: Sequence[str] | None = None,
+    registry_group_name: str | None = None,
     replace_registry_group_name: str | None = None,
     replace_registry_source: str | None = None,
     registry_entry_metadata: Dict[str, Dict[str, Any]] | None = None,
+    mask_filename_stage: str = "computed",
     save_outputs: bool = True,
 ) -> Dict[str, Any]:
-    base_prefix = safe_name(base_prefix, "region")
+    base_prefix = _public_filename_token(base_prefix, "region")
+    registry_group_name = safe_name(
+        registry_group_name if registry_group_name is not None else base_prefix,
+        "region",
+    )
     figure = make_region_overlay_figure(
         celltype_mask=celltype_mask,
         celltype_cfg=celltype_cfg,
@@ -695,7 +784,13 @@ def _save_region_like_outputs(
         assignments_df.to_csv(assign_csv, index=False)
         area_summary.to_csv(area_csv, index=False)
         write_json(params_json, params_payload)
-        mask_paths = _save_masks_as_uint8(masks, save_dir, suffix_template="{name}__" + base_prefix + "_region_mask_uint8.tiff")
+        mask_paths = _save_masks_as_uint8(
+            masks,
+            save_dir,
+            display_names={str(key): str(value) for key, value in display_name_map.items()},
+            filename_stage=mask_filename_stage,
+            workflow_name=workflow_name,
+        )
 
         registry_entries = []
         for mask_name, path in mask_paths.items():
@@ -706,7 +801,7 @@ def _save_region_like_outputs(
                 "mask_path": str(Path(path).relative_to(save_dir)),
                 "display_name": display_name,
                 "source": workflow_name,
-                "group_name": str(base_prefix),
+                "group_name": str(registry_group_name),
                 "mask_key": str(mask_name),
             }
             metadata = (registry_entry_metadata or {}).get(str(mask_name))
@@ -759,7 +854,11 @@ def save_adjusted_region_analysis(
     registry_entry_metadata: Dict[str, Dict[str, Any]] | None = None,
     save_outputs: bool = True,
 ) -> Dict[str, Any]:
-    base_prefix = "adjusted__" + "__".join(sorted(str(name) for name in adjusted_masks.keys())) if adjusted_masks else "adjusted"
+    legacy_registry_group_name = (
+        "adjusted__" + "__".join(sorted(str(name) for name in adjusted_masks.keys()))
+        if adjusted_masks
+        else "adjusted"
+    )
     display_name_map = {str(name): str(name) for name in adjusted_masks.keys()}
     if isinstance(boundary_display_names, dict):
         for key, value in boundary_display_names.items():
@@ -775,6 +874,19 @@ def save_adjusted_region_analysis(
         target_type = str(edit_meta.get("target_type") or "").strip()
         if target_type and target_type in adjusted_masks:
             edited_mask_names = [target_type]
+    target_key = str(edit_meta.get("target_type") or "").strip()
+    target_display_name = str(edit_meta.get("display_name") or "").strip()
+    if not target_display_name and target_key:
+        target_display_name = str(display_name_map.get(target_key) or "").strip()
+    if not target_display_name and len(edited_mask_names) == 1:
+        target_display_name = str(display_name_map.get(edited_mask_names[0]) or "").strip()
+    if _INTERNAL_REGION_HASH_RE.search(target_display_name):
+        target_display_name = ""
+    base_prefix = (
+        f"adjusted_region__{_human_filename_token(target_display_name, 'adjusted region')}"
+        if target_display_name
+        else "adjusted_regions"
+    )
     params_payload = {
         "workflow": "manual_boundary_adjustment",
         "selected_types": list(selected_types),
@@ -804,8 +916,10 @@ def save_adjusted_region_analysis(
         use_type_colors=use_type_colors,
         contour_downsample=contour_downsample,
         registry_mask_names=edited_mask_names,
+        registry_group_name=legacy_registry_group_name,
         replace_registry_source=replace_registry_source,
         registry_entry_metadata=registry_entry_metadata,
+        mask_filename_stage="adjusted",
         save_outputs=save_outputs,
     )
 
@@ -834,10 +948,10 @@ def save_manual_roi_analysis(
         base_name = raw_custom_names[idx - 1] if idx - 1 < len(raw_custom_names) and raw_custom_names[idx - 1] else f"ROI_{idx:03d}"
         candidate = str(base_name).strip() or f"ROI_{idx:03d}"
         suffix = 2
-        while candidate.lower() in used_names:
-            candidate = f"{base_name}_{suffix:02d}"
+        while candidate.casefold() in used_names:
+            candidate = f"{base_name} ({suffix})"
             suffix += 1
-        used_names.add(candidate.lower())
+        used_names.add(candidate.casefold())
         display_names.append(candidate)
 
     roi_masks = {display_name: (roi_label_mask == roi_id) for display_name, roi_id in zip(display_names, roi_ids)}
@@ -871,7 +985,11 @@ def save_manual_roi_analysis(
         title="Manual ROI selection",
     )
 
-    base_prefix = safe_name("__".join(selected_types) if selected_types else "all_types", "manual_roi")
+    legacy_registry_group_name = safe_name(
+        "__".join(selected_types) if selected_types else "all_types",
+        "manual_roi",
+    )
+    base_prefix = "manual_roi_selection"
     overlay_svg = save_dir / f"manual_roi_comparison__{base_prefix}.svg"
     overlay_png = save_dir / f"manual_roi_comparison__{base_prefix}.png"
     overlay_tiff = save_dir / f"manual_roi_comparison__{base_prefix}.tiff"
@@ -902,24 +1020,28 @@ def save_manual_roi_analysis(
         )
         save_uint16_tiff(roi_mask_tiff, roi_label_mask.astype(np.uint16))
 
+        roi_mask_paths = _save_masks_as_uint8(
+            roi_masks,
+            save_dir,
+            display_names={name: name for name in roi_masks},
+            filename_stage="manual",
+            workflow_name="manual_roi_selection",
+        )
         registry_entries = []
-        for roi_name, mask in roi_masks.items():
-            roi_mask_path = save_dir / f"manual_roi__{safe_name(roi_name, 'roi')}_region_mask_uint8.tiff"
-            save_uint8_tiff(roi_mask_path, np.asarray(mask).astype(np.uint8))
-            roi_mask_paths[roi_name] = roi_mask_path
+        for roi_name, roi_mask_path in roi_mask_paths.items():
             registry_entries.append(
                 {
                     "mask_path": str(roi_mask_path.relative_to(save_dir)),
                     "display_name": str(roi_name),
                     "source": "manual_roi_selection",
-                    "group_name": str(base_prefix),
+                    "group_name": str(legacy_registry_group_name),
                     "mask_key": str(roi_name),
                 }
             )
         registry_path = _update_boundary_registry(
             save_dir,
             registry_entries,
-            replace_group_name=str(base_prefix),
+            replace_group_name=str(legacy_registry_group_name),
             replace_source="manual_roi_selection",
         )
 
@@ -995,7 +1117,7 @@ def run_region_boundary_analysis(
 
     result = _save_region_like_outputs(
         save_dir=save_dir,
-        base_prefix="__".join(params.selected_types),
+        base_prefix="computed_regions",
         celltype_mask=celltype_mask,
         celltype_cfg=celltype_cfg,
         masks=masks,
@@ -1009,7 +1131,9 @@ def run_region_boundary_analysis(
         boundary_color=str(params.boundary_color),
         use_type_colors=bool(params.use_type_colors),
         contour_downsample=int(params.contour_downsample),
+        registry_group_name="__".join(params.selected_types),
         replace_registry_source="computational_roi_identification",
+        mask_filename_stage="computed",
         save_outputs=save_outputs,
     )
     result["celltype_mask"] = celltype_mask

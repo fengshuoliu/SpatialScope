@@ -2,6 +2,15 @@
 
 All notable changes to SpatialScope are documented here.
 
+## 1.2.4 - 2026-07-20 (Windows)
+
+- Made Distance Analysis mode-specific: nearest-neighbor keeps its Target selector, while cell-to-boundary runs directly from a boundary and one or more compact query-cell selections.
+- Added optimizer switches that keep nuclei minimum/maximum diameters or assignment Voronoi/buffer radii fixed while other parameters are screened; nuclei diameter locks default on and assignment locks default off.
+- Separated the Neighborhood field map from its numbered cluster color key and added a CSV mapping cluster numbers to cluster labels, counts, fractions, and colors.
+- Replaced opaque hashes in user-facing Region and analysis filenames with stable, readable stage and Region names while retaining legacy restore compatibility.
+- Unified section typography and spacing across the native workflow, preserved multi-marker rule pickers with Nucleus selected by default for every all-positive rule, and expanded release smoke coverage.
+- Kept the macOS application, Sparkle appcast, v1.2.1 release, and stable platform-specific download routes unchanged.
+
 ## 1.2.3 - 2026-07-20 (Windows)
 
 - Rebuilt Region Analysis around a saved ROI catalog, explicit computational and manual workflows, adjustable display styling, and custom exports.

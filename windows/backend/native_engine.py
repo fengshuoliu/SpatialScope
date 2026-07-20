@@ -89,6 +89,10 @@ from src.spatialscope_analysis.neighborhood_analysis import (  # noqa: E402
     run_neighborhood_analysis,
     save_neighborhood_analysis_outputs,
 )
+from src.spatialscope_analysis.optimizer_fixed_parameters import (  # noqa: E402
+    apply_assignment_fixed_parameter_keys,
+    apply_nuclei_fixed_parameter_keys,
+)
 from src.spatialscope_analysis.nuclei_segmentation import (  # noqa: E402
     SWEEP_PARAM_LABELS,
     recommend_nuclei_parameter_sweep_result,
@@ -111,7 +115,7 @@ from src.spatialscope_analysis.visualization import (  # noqa: E402
 
 
 PROTOCOL_VERSION = 1
-ENGINE_VERSION = "1.2.3"
+ENGINE_VERSION = "1.2.4"
 PROTOCOL_STDOUT = sys.stdout
 
 REGION_CONTOUR_DOWNSAMPLES = (1, 2, 4, 8)
@@ -326,6 +330,9 @@ def _artifact_manifest(output_root: Path, within: Path | None = None) -> list[Di
     for path in sorted(search_root.rglob("*")):
         if not path.is_file():
             continue
+        relative_parts = path.relative_to(output_root).parts
+        if "previews" in relative_parts or any(part.startswith(".") for part in relative_parts):
+            continue
         stat = path.stat()
         suffix = path.suffix.lower()
         mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
@@ -370,7 +377,8 @@ def _distribution_restore_preview_paths(distribution_dir: Path) -> Dict[str, Pat
         (distribution_dir / "01_region_masks").glob("region_bands__*__band_map.png")
     )
     density_plot = _latest_existing_file(
-        (distribution_dir / "02_cell_density").glob("cell_density__*__plot.png")
+        list((distribution_dir / "02_cell_density").glob("cell_density_by_boundary_distance__*__plot.png"))
+        + list((distribution_dir / "02_cell_density").glob("cell_density__*__plot.png"))
     )
     previews: Dict[str, Path] = {}
     if band_map is not None:
@@ -821,19 +829,22 @@ class NativeEngine:
                         saved_mode = text(mode_source.get("mode"), f"distance.{mode}.mode")
                         if saved_mode != mode:
                             raise ValueError(f"distance.{mode}.mode must be '{mode}'")
-                        target_type = text(mode_source.get("targetType"), f"distance.{mode}.targetType")
-                        if target_type not in available_types:
-                            raise ValueError(f"distance.{mode}.targetType is unavailable: {target_type}")
                         mode_parameters: Dict[str, Any] = {
                             "mode": mode,
-                            "targetType": target_type,
                             "queryTypes": string_list(
                                 mode_source.get("queryTypes"),
                                 f"distance.{mode}.queryTypes",
                                 allowed=available_types,
                             ),
                         }
-                        if mode == "boundary":
+                        if mode == "nearest":
+                            target_type = text(mode_source.get("targetType"), "distance.nearest.targetType")
+                            if target_type not in available_types:
+                                raise ValueError(
+                                    f"distance.nearest.targetType is unavailable: {target_type}"
+                                )
+                            mode_parameters["targetType"] = target_type
+                        else:
                             boundary_label = text(
                                 mode_source.get("boundaryLabel"),
                                 "distance.boundary.boundaryLabel",
@@ -868,9 +879,21 @@ class NativeEngine:
 
     def _output_record_is_current(self, relative_path: str) -> bool:
         normalized = str(relative_path).replace("\\", "/")
+        normalized_parts = normalized.split("/")
+        if "previews" in normalized_parts or any(part.startswith(".") for part in normalized_parts):
+            return False
         parts = normalized.split("/", 1)
         top = parts[0]
         name = parts[-1]
+        if top in {
+            SECTION_OUTPUT_SUBDIRS["region_analysis"],
+            SECTION_OUTPUT_SUBDIRS["integrated_region_analysis"],
+            SECTION_OUTPUT_SUBDIRS["cell_distribution_analysis"],
+        } and re.search(r"(?i)(?:^|[_-])[0-9a-f]{12,16}(?:[_\-.]|$)", Path(name).name):
+            # Legacy Windows builds exposed cache/identity hashes as if they
+            # were meaningful filenames. They remain on disk for restore, but
+            # the Results view presents only readable current exports.
+            return False
         if top == SECTION_OUTPUT_SUBDIRS["config"]:
             return True
         if top == SECTION_OUTPUT_SUBDIRS["overlay"]:
@@ -1120,6 +1143,19 @@ class NativeEngine:
         distribution_dir = output_folder / SECTION_OUTPUT_SUBDIRS["cell_distribution_analysis"]
         distance_dir = output_folder / SECTION_OUTPUT_SUBDIRS["distance_analysis"]
 
+        neighborhood_preview = next(
+            (
+                candidate
+                for candidate in (
+                    neighborhood_dir / "neighborhood_map.png",
+                    neighborhood_dir / "neighborhood_preview.png",
+                    neighborhood_dir / "neighborhood_clusters.png",
+                )
+                if candidate.is_file()
+            ),
+            neighborhood_dir / "neighborhood_map.png",
+        )
+
         preview_paths = {
             "overlay": overlay_dir / "overlay_preview.png",
             "split": overlay_dir / "split_channels_preview.png",
@@ -1127,7 +1163,8 @@ class NativeEngine:
             "nuclei": nuclei_dir / "nuclei_segmentation_preview.png",
             "assignmentOptimizer": assignment_optimizer_dir / "celltype_assignment_optimizer_preview.png",
             "cellTypes": assignment_dir / "celltype_assignment_preview.png",
-            "neighborhood": neighborhood_dir / "neighborhood_preview.png",
+            "neighborhood": neighborhood_preview,
+            "neighborhoodLegend": neighborhood_dir / "neighborhood_cluster_key.png",
             "region": region_dir / "region_analysis_preview.png",
             "regionOverlay": region_dir / "region_analysis_preview__overlay.png",
             "regionMask": region_dir / "region_analysis_preview__mask.png",
@@ -1277,9 +1314,11 @@ class NativeEngine:
         )
         nuclei_complete = self.nuclei_result is not None
         assignment_complete = nuclei_complete and self.assignment_result is not None
-        neighborhood_complete = stage_allowed("neighborhood") and assignment_complete and all(
-            (neighborhood_dir / name).is_file()
-            for name in ("neighborhood_tile_assignments.csv", "neighborhood_preview.png")
+        neighborhood_complete = (
+            stage_allowed("neighborhood")
+            and assignment_complete
+            and (neighborhood_dir / "neighborhood_tile_assignments.csv").is_file()
+            and neighborhood_preview.is_file()
         )
         region_complete = stage_allowed("region") and assignment_complete and self.region_result is not None
         distribution_complete = (
@@ -1361,6 +1400,7 @@ class NativeEngine:
             "nuclei": "nuclei",
             "cellTypes": "cellTypes",
             "neighborhood": "neighborhood",
+            "neighborhoodLegend": "neighborhood",
             "region": "region",
             "regionOverlay": "region",
             "regionMask": "region",
@@ -1563,6 +1603,12 @@ class NativeEngine:
             "watershed_compactness": {"min": 0.0, "max": 4.0, "step": 0.05},
             "post_resplit_mult": {"min": 0.0, "max": 5.0, "step": 0.05},
         }
+        fixed_search = apply_nuclei_fixed_parameter_keys(
+            search_specs,
+            base_params,
+            payload.get("fixedParameterKeys"),
+        )
+        search_specs = fixed_search.search_specs
         max_evaluations = max(1, min(int(payload.get("maxEvaluations", 64)), 4096))
         _progress(request_id, 0.05, f"Screening up to {max_evaluations} nuclei parameter combinations")
         output_dir = _section_dir(config, "nuclei")
@@ -1599,6 +1645,13 @@ class NativeEngine:
                 if column in recommended_row:
                     recommended[key] = _json_scalar(recommended_row[column])
         write_json(output_dir / "nuclei_native_optimizer_recommendation.json", recommended)
+        write_json(
+            output_dir / "nuclei_native_optimizer_fixed_parameters.json",
+            {
+                "fixedParameterKeys": list(fixed_search.fixed_parameter_keys),
+                "fixedParameters": dict(fixed_search.fixed_parameters),
+            },
+        )
         preview_path = self._save_first_result_figure_preview(result, output_dir / "nuclei_optimizer_preview.png")
         evaluated = int(result.get("evaluated_unique_combinations", len(result.get("results", []))))
         _close_figures(result)
@@ -1608,6 +1661,8 @@ class NativeEngine:
         return {
             "summary": {"evaluatedCombinations": evaluated},
             "recommendedParameters": recommended,
+            "fixedParameterKeys": list(fixed_search.fixed_parameter_keys),
+            "fixedParameters": dict(fixed_search.fixed_parameters),
             "previewPath": str(preview_path) if preview_path else None,
             "artifacts": _artifact_manifest(Path(config.save_dir), output_dir),
         }
@@ -1732,6 +1787,12 @@ class NativeEngine:
             ambiguous_min_gap=float(raw.get("ambiguous_min_gap", 0.10)),
         )
         search_specs = payload.get("searchSpecs") or copy.deepcopy(ASSIGNMENT_OPTIMIZER_SEARCH_SPECS)
+        fixed_search = apply_assignment_fixed_parameter_keys(
+            search_specs,
+            base_params,
+            payload.get("fixedParameterKeys"),
+        )
+        search_specs = fixed_search.search_specs
         max_evaluations = max(1, min(int(payload.get("maxEvaluations", 64)), 4096))
         _progress(request_id, 0.05, f"Screening up to {max_evaluations} assignment parameter combinations")
         output_dir = _section_dir(config, "celltype_assignment_parameters")
@@ -1777,6 +1838,13 @@ class NativeEngine:
                 if column in recommended_row:
                     recommended[key] = _json_scalar(recommended_row[column])
         write_json(output_dir / "celltype_assignment_native_optimizer_recommendation.json", recommended)
+        write_json(
+            output_dir / "celltype_assignment_native_optimizer_fixed_parameters.json",
+            {
+                "fixedParameterKeys": list(fixed_search.fixed_parameter_keys),
+                "fixedParameters": dict(fixed_search.fixed_parameters),
+            },
+        )
         preview_path = self._save_first_result_figure_preview(result, output_dir / "celltype_assignment_optimizer_preview.png")
         evaluated = int(result.get("evaluated_unique_combinations", len(result.get("results", []))))
         _close_figures(result)
@@ -1786,6 +1854,8 @@ class NativeEngine:
         return {
             "summary": {"evaluatedCombinations": evaluated},
             "recommendedParameters": recommended,
+            "fixedParameterKeys": list(fixed_search.fixed_parameter_keys),
+            "fixedParameters": dict(fixed_search.fixed_parameters),
             "previewPath": str(preview_path) if preview_path else None,
             "artifacts": _artifact_manifest(Path(config.save_dir), output_dir),
         }
@@ -1846,7 +1916,9 @@ class NativeEngine:
             display_cluster_labels=display_clusters,
             save_outputs=True,
         )
-        preview_path = self._save_first_result_figure_preview(saved, output_dir / "neighborhood_preview.png")
+        saved_paths = saved.get("saved_paths", {})
+        preview_path = Path(saved_paths["map_png"])
+        legend_preview_path = Path(saved_paths["legend_png"])
         _close_figures(saved)
         self.region_result = None
         self.distribution_result = None
@@ -1863,7 +1935,8 @@ class NativeEngine:
                 "occupiedTiles": int(len(self.neighborhood_result.get("tile_assignments", []))),
             },
             "clusterLabels": labels,
-            "previewPath": str(preview_path) if preview_path else None,
+            "previewPath": str(preview_path) if preview_path.is_file() else None,
+            "legendPreviewPath": str(legend_preview_path) if legend_preview_path.is_file() else None,
             "artifacts": _artifact_manifest(Path(config.save_dir), output_dir),
         }
 
@@ -2403,10 +2476,10 @@ class NativeEngine:
     @staticmethod
     def _preview_cache_path(output_dir: Path, prefix: str, preview_key: Any, identity: Dict[str, Any]) -> Path:
         key = safe_name(str(preview_key or "display"), "display").lower()
-        digest = hashlib.sha256(
-            json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()[:14]
-        path = output_dir / "previews" / f"{safe_name(prefix, 'region_preview')}__{key}__{digest}.png"
+        # Preview images are transient UI state, not durable scientific output.
+        # One stable path per preview surface avoids accumulating opaque hashes.
+        _ = identity
+        path = output_dir / "previews" / f"{safe_name(prefix, 'region_preview')}__{key}.png"
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -3103,22 +3176,13 @@ class NativeEngine:
             selected_cell_types,
             inherit_saved=True,
         )
-        identity = {
-            "boundaries": [str(record["id"]) for record in records],
-            "cellTypes": selected_cell_types,
-            "boundaryCellTypeMode": boundary_cell_type_mode,
-            "parameters": normalized_parameters,
-        }
-        digest = hashlib.sha256(
-            json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()[:14]
         root = _section_dir(config, "integrated_region_analysis")
         original_dir = root / "01_original_unmodified"
         customized_dir = root / "02_customized_display"
         original_dir.mkdir(parents=True, exist_ok=True)
         customized_dir.mkdir(parents=True, exist_ok=True)
 
-        customized_png = customized_dir / f"customized_region__{digest}.png"
+        customized_png = customized_dir / "customized_region.png"
         customized_pair = self._write_region_preview_pair(
             records,
             selected_cell_types,
@@ -3185,7 +3249,7 @@ class NativeEngine:
                 suffix += 1
             record["label"] = label
             used_original_labels.add(label.casefold())
-        original_png = original_dir / f"original_region__{digest}.png"
+        original_png = original_dir / "original_region.png"
         original_pair = self._write_region_preview_pair(
             original_records,
             selected_cell_types,
@@ -3202,7 +3266,7 @@ class NativeEngine:
         )
 
         write_json(
-            customized_dir / f"customized_region__{digest}.json",
+            customized_dir / "customized_region.json",
             {
                 "workflow": "customized_region_export",
                 "selectedBoundaryIds": [str(record["id"]) for record in records],
@@ -3217,7 +3281,7 @@ class NativeEngine:
             },
         )
         write_json(
-            original_dir / f"original_region__{digest}.json",
+            original_dir / "original_region.json",
             {
                 "workflow": "original_unmodified_region_export",
                 "sourceBoundaryIds": [str(record["id"]) for record in records],
@@ -3347,17 +3411,24 @@ class NativeEngine:
             for value in self.assignment_result["df_cells"]["celltype"].astype(str).unique().tolist()
             if str(value) not in {"Unassigned", "Ambiguous"}
         ]
-        raw_target = payload.get("targetType")
-        if raw_target is None:
-            raw_target = present_types[0] if present_types else ""
-        if not isinstance(raw_target, str) or not raw_target.strip():
-            raise ValueError("Select a target cell type.")
-        target = raw_target.strip()
-        if target not in set(present_types):
-            raise ValueError(f"Distance targetType is unavailable: {target}")
+        target: str | None = None
+        if mode == "nearest":
+            raw_target = payload.get("targetType")
+            if raw_target is None:
+                raw_target = present_types[0] if present_types else ""
+            if not isinstance(raw_target, str) or not raw_target.strip():
+                raise ValueError("Select a target cell type.")
+            target = raw_target.strip()
+            if target not in set(present_types):
+                raise ValueError(f"Distance targetType is unavailable: {target}")
         raw_queries = payload.get("queryTypes")
+        default_queries = (
+            list(present_types)
+            if mode == "boundary"
+            else [value for value in present_types if value != target] or ([target] if target else [])
+        )
         queries = _normalized_string_list(
-            present_types[1:] if raw_queries is None else raw_queries,
+            default_queries if raw_queries is None else raw_queries,
             "Distance queryTypes",
             allowed=set(present_types),
         )
@@ -3404,7 +3475,6 @@ class NativeEngine:
         _progress(request_id, 0.12, "Computing distances")
         normalized_parameters: Dict[str, Any] = {
             "mode": mode,
-            "targetType": target,
             "queryTypes": list(queries),
         }
         if mode == "boundary":
@@ -3424,6 +3494,7 @@ class NativeEngine:
             normalized_parameters["boundaryLabel"] = boundary_label
             normalized_parameters["regionFilter"] = region_filter
         else:
+            assert target is not None
             result = run_nearest_neighbor_analysis(
                 df_cells=self.assignment_result["df_cells"],
                 celltype_cfg=self.celltype_config,
@@ -3433,6 +3504,7 @@ class NativeEngine:
                 query_types=queries,
                 save_outputs=True,
             )
+            normalized_parameters["targetType"] = target
         preview_path = self._save_first_result_figure_preview(result, output_dir / f"{mode}_distance_preview.png")
         _close_figures(result)
         distance_parameters = self.analysis_parameters.get("distance")
@@ -3443,8 +3515,11 @@ class NativeEngine:
         self.analysis_parameters["distance"] = distance_parameters
         self._mark_workflow_stage("distance", invalidate_after=True)
         _progress(request_id, 1.0, "Distance analysis complete")
+        summary: Dict[str, Any] = {"mode": mode, "queryTypes": queries}
+        if target is not None:
+            summary["targetType"] = target
         return {
-            "summary": {"mode": mode, "targetType": target, "queryTypes": queries},
+            "summary": summary,
             "previewPath": str(preview_path) if preview_path else None,
             "artifacts": _artifact_manifest(Path(config.save_dir), output_dir),
         }

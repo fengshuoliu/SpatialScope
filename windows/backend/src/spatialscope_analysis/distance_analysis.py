@@ -305,10 +305,9 @@ def run_nearest_neighbor_analysis(
     df_long = pd.concat(all_rows, ignore_index=True)
     df_long["pair_id"] = df_long["target_label"].astype(str)
 
-    base = safe_name(f"nn_{target_type}__to__{'__'.join(query_types)}", "nn")
-    csv_path = save_dir / f"nearest_neighbor_distances__{base}.csv"
-    svg_path = save_dir / f"nearest_neighbor_distances__{base}.svg"
-    png_path = save_dir / f"nearest_neighbor_distances__{base}.png"
+    csv_path = save_dir / "nearest_neighbor_distances.csv"
+    svg_path = save_dir / "nearest_neighbor_distances.svg"
+    png_path = save_dir / "nearest_neighbor_distances.png"
 
     if save_outputs:
         df_long.to_csv(csv_path, index=False)
@@ -548,13 +547,9 @@ def run_boundary_distance_analysis(
         return fig, comparison_df
 
     boundary_display_name = str(boundary_name).strip() or Path(boundary_mask_path).stem
-    base = safe_name(
-        f"to_boundary__{boundary_display_name}__from__{'__'.join(query_types)}__{region_filter}",
-        "boundary",
-    )
-    csv_path = save_dir / f"dist_to_boundary__{base}.csv"
-    svg_path = save_dir / f"dist_to_boundary__{base}.svg"
-    png_path = save_dir / f"dist_to_boundary__{base}.png"
+    csv_path = save_dir / "cell_to_boundary_distances.csv"
+    svg_path = save_dir / "cell_to_boundary_distances.svg"
+    png_path = save_dir / "cell_to_boundary_distances.png"
 
     if save_outputs:
         df_long.to_csv(csv_path, index=False)

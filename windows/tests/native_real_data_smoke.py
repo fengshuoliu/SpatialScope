@@ -68,18 +68,23 @@ def _snake_nuclei_parameters(raw: dict[str, Any], nucleus_channel: str) -> dict[
 
 
 def _snake_assignment_parameters(raw: dict[str, Any]) -> dict[str, Any]:
+    def value(camel_key: str, snake_key: str) -> Any:
+        if camel_key in raw:
+            return raw[camel_key]
+        return raw[snake_key]
+
     return {
-        "r_voronoi_um": float(raw["rVoronoiUm"]),
-        "r_buffer_um": float(raw["rBufferUm"]),
-        "r_vote_um": float(raw["rVoteUm"]),
-        "tophat_r_um": float(raw["tophatRUm"]),
-        "gauss_sigma_um": float(raw["gaussSigmaUm"]),
-        "thresh_mode": str(raw["threshMode"]),
-        "min_pos_object_size_px": int(raw["minPosObjectSizePx"]),
-        "min_pos_pix": int(raw["minPosPix"]),
-        "resolve_ambiguous": bool(raw["resolveAmbiguous"]),
-        "ambiguous_min_probability": float(raw["ambiguousMinProbability"]),
-        "ambiguous_min_gap": float(raw["ambiguousMinGap"]),
+        "r_voronoi_um": float(value("rVoronoiUm", "r_voronoi_um")),
+        "r_buffer_um": float(value("rBufferUm", "r_buffer_um")),
+        "r_vote_um": float(value("rVoteUm", "r_vote_um")),
+        "tophat_r_um": float(value("tophatRUm", "tophat_r_um")),
+        "gauss_sigma_um": float(value("gaussSigmaUm", "gauss_sigma_um")),
+        "thresh_mode": str(value("threshMode", "thresh_mode")),
+        "min_pos_object_size_px": int(value("minPosObjectSizePx", "min_pos_object_size_px")),
+        "min_pos_pix": int(value("minPosPix", "min_pos_pix")),
+        "resolve_ambiguous": bool(value("resolveAmbiguous", "resolve_ambiguous")),
+        "ambiguous_min_probability": float(value("ambiguousMinProbability", "ambiguous_min_probability")),
+        "ambiguous_min_gap": float(value("ambiguousMinGap", "ambiguous_min_gap")),
     }
 
 
@@ -347,7 +352,6 @@ def run_real_data_smoke(
             "distance",
             {
                 "mode": "boundary",
-                "targetType": resolved_types[0],
                 "queryTypes": resolved_types,
                 "boundaryLabel": boundary_label,
                 "regionFilter": "all",
