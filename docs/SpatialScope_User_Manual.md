@@ -1,6 +1,6 @@
 # SpatialScope User Manual
 
-**Applies to:** SpatialScope 1.2.1 for macOS and SpatialScope 1.2.1 for Windows<br>
+**Applies to:** SpatialScope 1.2.1 for macOS and SpatialScope 1.2.2 for Windows<br>
 **Workflow:** image preparation → aligned channel CSV files → composite preview → nuclei → cell types → neighborhoods → regions → distribution → distances → exports
 
 > The screenshots show the macOS interface with an example 16-channel dataset. Windows uses the same nine-stage analysis workflow and output contracts in a native WPF desktop layout, so control placement differs slightly. Marker names, colors, cell types, counts, and results will vary by dataset.

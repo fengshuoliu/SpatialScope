@@ -17,12 +17,24 @@ public sealed class WorkflowSection : INotifyPropertyChanged
 {
     private WorkflowStatus _status;
     private bool _isSelected;
+    private string _statusDisplayText = string.Empty;
 
     public required string Key { get; init; }
     public required int Number { get; init; }
     public required string IconGlyph { get; init; }
     public string Title { get; set; } = string.Empty;
     public string Subtitle { get; set; } = string.Empty;
+
+    public string StatusDisplayText
+    {
+        get => _statusDisplayText;
+        set
+        {
+            if (_statusDisplayText == value) return;
+            _statusDisplayText = value;
+            OnPropertyChanged();
+        }
+    }
 
     public WorkflowStatus Status
     {
@@ -35,6 +47,7 @@ public sealed class WorkflowSection : INotifyPropertyChanged
             OnPropertyChanged(nameof(StatusBackground));
             OnPropertyChanged(nameof(StatusForeground));
             OnPropertyChanged(nameof(StatusText));
+            OnPropertyChanged(nameof(StatusGlyph));
         }
     }
 
@@ -68,7 +81,7 @@ public sealed class WorkflowSection : INotifyPropertyChanged
         WorkflowStatus.Running => BrushFrom("#9A5A00"),
         WorkflowStatus.Complete => BrushFrom("#17653A"),
         WorkflowStatus.Error => BrushFrom("#9A2828"),
-        _ => BrushFrom("#68757A"),
+        _ => BrushFrom("#526168"),
     };
 
     public Brush BorderBrush => IsSelected ? BrushFrom("#087E8B") : BrushFrom("#00000000");
@@ -81,6 +94,15 @@ public sealed class WorkflowSection : INotifyPropertyChanged
         WorkflowStatus.Complete => "Complete",
         WorkflowStatus.Error => "NeedsAttention",
         _ => "NotStarted",
+    };
+
+    public string StatusGlyph => Status switch
+    {
+        WorkflowStatus.Ready => "→",
+        WorkflowStatus.Running => "●",
+        WorkflowStatus.Complete => "✓",
+        WorkflowStatus.Error => "!",
+        _ => "○",
     };
 
     public event PropertyChangedEventHandler? PropertyChanged;

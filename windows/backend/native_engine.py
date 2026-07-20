@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import contextlib
 import hashlib
 import io
 import json
+import math
 import mimetypes
 import os
 import subprocess
@@ -97,7 +99,7 @@ from src.spatialscope_analysis.visualization import (  # noqa: E402
 
 
 PROTOCOL_VERSION = 1
-ENGINE_VERSION = "1.2.1"
+ENGINE_VERSION = "1.2.2"
 PROTOCOL_STDOUT = sys.stdout
 
 SECTION_OUTPUT_SUBDIRS = {
@@ -126,6 +128,23 @@ WORKFLOW_STAGES = (
     "outputs",
 )
 WORKFLOW_STATE_FILE = "windows_session_state.json"
+
+ASSIGNMENT_OPTIMIZER_SEARCH_SPECS: Dict[str, Dict[str, Any]] = {
+    "r_voronoi_um": {"kind": "float", "min": 0.0, "max": 300.0, "step": 1.0},
+    "r_buffer_um": {"kind": "float", "min": 0.0, "max": 300.0, "step": 1.0},
+    "r_vote_um": {"kind": "float", "min": 0.0, "max": 300.0, "step": 1.0},
+    "tophat_r_um": {"kind": "float", "min": 0.0, "max": 150.0, "step": 1.0},
+    "gauss_sigma_um": {"kind": "float", "min": 0.0, "max": 75.0, "step": 0.5},
+    "thresh_mode": {
+        "kind": "choice",
+        "options": ["global_otsu", "local", "yen", "triangle"],
+    },
+    "min_pos_object_size_px": {"kind": "int", "min": 0, "max": 80, "step": 1},
+    "min_pos_pix": {"kind": "int", "min": 0, "max": 40, "step": 1},
+    "resolve_ambiguous": {"kind": "bool", "options": [True]},
+    "ambiguous_min_probability": {"kind": "float", "min": 0.01, "max": 1.0, "step": 0.01},
+    "ambiguous_min_gap": {"kind": "float", "min": 0.0, "max": 1.0, "step": 0.01},
+}
 
 
 def _cpu_budget(payload: Dict[str, Any], key: str = "cpuWorkers", maximum: int | None = None) -> int:
@@ -210,6 +229,55 @@ def _json_scalar(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
+
+
+def _normalized_number(
+    value: Any,
+    label: str,
+    *,
+    minimum: float = 0.0,
+    strictly_positive: bool = False,
+    integer: bool = False,
+) -> float | int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{label} must be numeric")
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        raise ValueError(f"{label} must be finite")
+    if strictly_positive and numeric <= minimum:
+        raise ValueError(f"{label} must be greater than {minimum:g}")
+    if not strictly_positive and numeric < minimum:
+        raise ValueError(f"{label} must be at least {minimum:g}")
+    if integer:
+        if not numeric.is_integer():
+            raise ValueError(f"{label} must be an integer")
+        return int(numeric)
+    return numeric
+
+
+def _normalized_string_list(
+    value: Any,
+    label: str,
+    *,
+    allowed: set[str] | None = None,
+    allow_empty: bool = False,
+) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must be an array")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"{label} items must be nonempty strings")
+        text = item.strip()
+        if allowed is not None and text not in allowed:
+            raise ValueError(f"{label} contains an unavailable value: {text}")
+        if text not in seen:
+            normalized.append(text)
+            seen.add(text)
+    if not allow_empty and not normalized:
+        raise ValueError(f"{label} must not be empty")
+    return normalized
 
 
 def _config_fingerprint(config: PipelineConfig) -> str:
@@ -304,6 +372,7 @@ class NativeEngine:
         self.workflow_state = {stage: False for stage in WORKFLOW_STAGES}
         self.recommendation_state = {"nuclei": False, "assignment": False}
         self.pending_parameters: Dict[str, Dict[str, Any]] = {"nuclei": {}, "assignment": {}}
+        self.analysis_parameters: Dict[str, Any] = {}
 
     def dispatch(self, request_id: str, command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         handlers: Dict[str, Callable[[str, Dict[str, Any]], Dict[str, Any]]] = {
@@ -376,28 +445,41 @@ class NativeEngine:
 
     def _persist_workflow_state(self) -> None:
         config = self._require_config()
-        _atomic_write_json(
-            self._workflow_state_path(),
-            {
-                "schemaVersion": 1,
-                "configFingerprint": _config_fingerprint(config),
-                "stages": {stage: bool(self.workflow_state.get(stage, False)) for stage in WORKFLOW_STAGES},
-                "recommendations": {
-                    kind: bool(self.recommendation_state.get(kind, False))
-                    for kind in ("nuclei", "assignment")
-                },
-                "pendingParameters": {
-                    kind: dict(self.pending_parameters.get(kind, {}))
-                    for kind in ("nuclei", "assignment")
-                },
+        state: Dict[str, Any] = {
+            "schemaVersion": 1,
+            "configFingerprint": _config_fingerprint(config),
+            "stages": {stage: bool(self.workflow_state.get(stage, False)) for stage in WORKFLOW_STAGES},
+            "recommendations": {
+                kind: bool(self.recommendation_state.get(kind, False))
+                for kind in ("nuclei", "assignment")
             },
-        )
+            "pendingParameters": {
+                kind: dict(self.pending_parameters.get(kind, {}))
+                for kind in ("nuclei", "assignment")
+            },
+        }
+        if self.analysis_parameters:
+            state["analysisParameters"] = copy.deepcopy(self.analysis_parameters)
+        _atomic_write_json(self._workflow_state_path(), state)
 
     def _reset_workflow_state(self) -> None:
         self.workflow_state = {stage: stage == "inputs" for stage in WORKFLOW_STAGES}
         self.recommendation_state = {"nuclei": False, "assignment": False}
         self.pending_parameters = {"nuclei": {}, "assignment": {}}
+        self.analysis_parameters = {}
         self._persist_workflow_state()
+
+    def _clear_analysis_parameters_from(self, stage: str, *, include_current: bool) -> None:
+        start = WORKFLOW_STAGES.index(stage) + (0 if include_current else 1)
+        analysis_stages = {
+            "neighborhood": "neighborhood",
+            "region": "region",
+            "distribution": "distribution",
+            "distance": "distance",
+        }
+        for key, owning_stage in analysis_stages.items():
+            if WORKFLOW_STAGES.index(owning_stage) >= start:
+                self.analysis_parameters.pop(key, None)
 
     def _invalidate_recommendations_from(self, stage: str) -> None:
         start = WORKFLOW_STAGES.index(stage)
@@ -414,6 +496,7 @@ class NativeEngine:
             start = WORKFLOW_STAGES.index(stage) + 1
             for later in WORKFLOW_STAGES[start:]:
                 self.workflow_state[later] = False
+            self._clear_analysis_parameters_from(stage, include_current=False)
             self._invalidate_recommendations_from(stage)
         self.workflow_state[stage] = True
         self._persist_workflow_state()
@@ -423,6 +506,7 @@ class NativeEngine:
         stage: str,
         *,
         preserve_current: str | None = None,
+        preserve_distance_parameters: bool = False,
         persist: bool = True,
     ) -> None:
         if stage not in WORKFLOW_STAGES:
@@ -431,6 +515,11 @@ class NativeEngine:
             dict(self.pending_parameters.get(preserve_current, {}))
             if preserve_current in {"nuclei", "assignment"}
             else {}
+        )
+        preserved_distance = (
+            copy.deepcopy(self.analysis_parameters.get("distance"))
+            if preserve_distance_parameters and isinstance(self.analysis_parameters.get("distance"), dict)
+            else None
         )
         start = WORKFLOW_STAGES.index(stage)
         for affected in WORKFLOW_STAGES[start:]:
@@ -451,11 +540,232 @@ class NativeEngine:
             self.region_result = None
         if start <= WORKFLOW_STAGES.index("distribution"):
             self.distribution_result = None
+        self._clear_analysis_parameters_from(stage, include_current=True)
         self._invalidate_recommendations_from(stage)
         if preserve_current in {"nuclei", "assignment"}:
             self.pending_parameters[preserve_current] = preserved_pending
+        if preserved_distance is not None:
+            self.analysis_parameters["distance"] = preserved_distance
         if persist:
             self._persist_workflow_state()
+
+    def _validate_restored_analysis_parameters(
+        self,
+        raw: Any,
+        workflow: Dict[str, bool],
+        resolved_cell_types: Sequence[str],
+        boundaries: Sequence[Dict[str, str]],
+        warnings: list[str],
+    ) -> Dict[str, Any]:
+        if raw is None:
+            return {}
+        if not isinstance(raw, dict):
+            warnings.append("Saved analysis parameters were ignored: expected an object.")
+            return {}
+
+        available_types = {str(value) for value in resolved_cell_types}
+        available_boundaries = {
+            str(item.get("label") or "")
+            for item in boundaries
+            if str(item.get("label") or "")
+        }
+        available_channels = {
+            channel.channel
+            for channel in self._require_config().channels
+        }
+
+        def record(value: Any, label: str) -> Dict[str, Any]:
+            if not isinstance(value, dict):
+                raise ValueError(f"{label} must be an object")
+            return value
+
+        def text(value: Any, label: str) -> str:
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{label} must be a nonempty string")
+            return value
+
+        def number(
+            value: Any,
+            label: str,
+            *,
+            minimum: float = 0.0,
+            strictly_positive: bool = False,
+            integer: bool = False,
+        ) -> float | int:
+            return _normalized_number(
+                value,
+                label,
+                minimum=minimum,
+                strictly_positive=strictly_positive,
+                integer=integer,
+            )
+
+        def string_list(
+            value: Any,
+            label: str,
+            *,
+            allowed: set[str] | None = None,
+            allow_empty: bool = False,
+        ) -> list[str]:
+            return _normalized_string_list(
+                value,
+                label,
+                allowed=allowed,
+                allow_empty=allow_empty,
+            )
+
+        validated: Dict[str, Any] = {}
+
+        if workflow.get("neighborhood") and "neighborhood" in raw:
+            try:
+                source = record(raw["neighborhood"], "neighborhood")
+                raw_colors = record(source.get("clusterColors"), "neighborhood.clusterColors")
+                colors = {
+                    text(key, "neighborhood.clusterColors key"): text(
+                        value,
+                        "neighborhood.clusterColors value",
+                    )
+                    for key, value in raw_colors.items()
+                }
+                validated["neighborhood"] = {
+                    "gridSizeUm": number(
+                        source.get("gridSizeUm"),
+                        "neighborhood.gridSizeUm",
+                        strictly_positive=True,
+                    ),
+                    "clusterColors": colors,
+                    "displayClusters": string_list(
+                        source.get("displayClusters"),
+                        "neighborhood.displayClusters",
+                        allow_empty=True,
+                    ),
+                }
+            except ValueError as error:
+                warnings.append(f"Saved neighborhood analysis parameters were ignored: {error}")
+
+        if workflow.get("region") and "region" in raw:
+            try:
+                source = record(raw["region"], "region")
+                use_type_colors = source.get("useTypeColors")
+                if not isinstance(use_type_colors, bool):
+                    raise ValueError("region.useTypeColors must be a boolean")
+                validated["region"] = {
+                    "selectedTypes": string_list(
+                        source.get("selectedTypes"),
+                        "region.selectedTypes",
+                        allowed=available_types,
+                    ),
+                    "closeUm": number(source.get("closeUm"), "region.closeUm"),
+                    "dilateUm": number(source.get("dilateUm"), "region.dilateUm"),
+                    "minAreaUm2": number(source.get("minAreaUm2"), "region.minAreaUm2"),
+                    "minCells": number(
+                        source.get("minCells"),
+                        "region.minCells",
+                        minimum=1.0,
+                        integer=True,
+                    ),
+                    "contourDownsample": number(
+                        source.get("contourDownsample"),
+                        "region.contourDownsample",
+                        strictly_positive=True,
+                        integer=True,
+                    ),
+                    "lineWidth": number(
+                        source.get("lineWidth"),
+                        "region.lineWidth",
+                        strictly_positive=True,
+                    ),
+                    "lineStyle": text(source.get("lineStyle"), "region.lineStyle"),
+                    "boundaryColor": text(source.get("boundaryColor"), "region.boundaryColor"),
+                    "useTypeColors": use_type_colors,
+                }
+            except ValueError as error:
+                warnings.append(f"Saved region analysis parameters were ignored: {error}")
+
+        if workflow.get("distribution") and "distribution" in raw:
+            try:
+                source = record(raw["distribution"], "distribution")
+                boundary_label = text(source.get("boundaryLabel"), "distribution.boundaryLabel")
+                if boundary_label not in available_boundaries:
+                    raise ValueError(f"distribution.boundaryLabel is unavailable: {boundary_label}")
+                validated["distribution"] = {
+                    "boundaryLabel": boundary_label,
+                    "bandWidthUm": number(
+                        source.get("bandWidthUm"),
+                        "distribution.bandWidthUm",
+                        strictly_positive=True,
+                    ),
+                    "overlayChannels": string_list(
+                        source.get("overlayChannels"),
+                        "distribution.overlayChannels",
+                        allowed=available_channels,
+                        allow_empty=True,
+                    ),
+                    "selectedCellTypes": string_list(
+                        source.get("selectedCellTypes"),
+                        "distribution.selectedCellTypes",
+                        allowed=available_types,
+                    ),
+                }
+            except ValueError as error:
+                warnings.append(f"Saved distribution analysis parameters were ignored: {error}")
+
+        if workflow.get("distance") and "distance" in raw:
+            try:
+                source = record(raw["distance"], "distance")
+                distance_parameters: Dict[str, Any] = {}
+                for mode in ("nearest", "boundary"):
+                    if mode not in source:
+                        continue
+                    try:
+                        mode_source = record(source[mode], f"distance.{mode}")
+                        saved_mode = text(mode_source.get("mode"), f"distance.{mode}.mode")
+                        if saved_mode != mode:
+                            raise ValueError(f"distance.{mode}.mode must be '{mode}'")
+                        target_type = text(mode_source.get("targetType"), f"distance.{mode}.targetType")
+                        if target_type not in available_types:
+                            raise ValueError(f"distance.{mode}.targetType is unavailable: {target_type}")
+                        mode_parameters: Dict[str, Any] = {
+                            "mode": mode,
+                            "targetType": target_type,
+                            "queryTypes": string_list(
+                                mode_source.get("queryTypes"),
+                                f"distance.{mode}.queryTypes",
+                                allowed=available_types,
+                            ),
+                        }
+                        if mode == "boundary":
+                            boundary_label = text(
+                                mode_source.get("boundaryLabel"),
+                                "distance.boundary.boundaryLabel",
+                            )
+                            if boundary_label not in available_boundaries:
+                                raise ValueError(
+                                    f"distance.boundary.boundaryLabel is unavailable: {boundary_label}"
+                                )
+                            region_filter = text(
+                                mode_source.get("regionFilter"),
+                                "distance.boundary.regionFilter",
+                            )
+                            if region_filter not in {"all", "inside", "outside"}:
+                                raise ValueError(
+                                    "distance.boundary.regionFilter must be 'all', 'inside', or 'outside'"
+                                )
+                            mode_parameters["boundaryLabel"] = boundary_label
+                            mode_parameters["regionFilter"] = region_filter
+                        distance_parameters[mode] = mode_parameters
+                    except ValueError as error:
+                        warnings.append(f"Saved {mode} distance parameters were ignored: {error}")
+
+                last_mode = text(source.get("lastMode"), "distance.lastMode")
+                if last_mode not in distance_parameters:
+                    raise ValueError("distance.lastMode does not identify a valid saved distance mode")
+                distance_parameters["lastMode"] = last_mode
+                validated["distance"] = distance_parameters
+            except ValueError as error:
+                warnings.append(f"Saved distance analysis parameters were ignored: {error}")
+
+        return validated
 
     def _output_record_is_current(self, relative_path: str) -> bool:
         normalized = str(relative_path).replace("\\", "/")
@@ -643,6 +953,7 @@ class NativeEngine:
         self.neighborhood_result = None
         self.region_result = None
         self.distribution_result = None
+        self.analysis_parameters = {}
         warnings: list[str] = []
         if not input_folder.is_dir():
             warnings.append(f"The saved input folder is not currently available: {input_folder}")
@@ -650,6 +961,7 @@ class NativeEngine:
         manifest_stages: Dict[str, bool] | None = None
         manifest_recommendations: Dict[str, bool] | None = None
         manifest_pending_parameters: Dict[str, Dict[str, Any]] = {"nuclei": {}, "assignment": {}}
+        manifest_analysis_parameters: Any = None
         manifest_path = output_folder / SECTION_OUTPUT_SUBDIRS["config"] / WORKFLOW_STATE_FILE
         if manifest_path.is_file():
             try:
@@ -677,6 +989,7 @@ class NativeEngine:
                                 for key, value in raw_values.items()
                                 if isinstance(value, (str, int, float, bool)) or value is None
                             }
+                manifest_analysis_parameters = manifest.get("analysisParameters")
                 if manifest_pending_parameters["nuclei"]:
                     for stage in WORKFLOW_STAGES[WORKFLOW_STAGES.index("nuclei"):]:
                         manifest_stages[stage] = False
@@ -688,6 +1001,7 @@ class NativeEngine:
                 manifest_stages = {stage: stage == "inputs" for stage in WORKFLOW_STAGES}
                 manifest_recommendations = {"nuclei": False, "assignment": False}
                 manifest_pending_parameters = {"nuclei": {}, "assignment": {}}
+                manifest_analysis_parameters = None
         else:
             warnings.append("Loaded a legacy result folder; validated artifacts were used to reconstruct workflow history.")
 
@@ -921,6 +1235,15 @@ class NativeEngine:
             }
         )
         workflow["inputs"] = True
+
+        resolved_cell_types: list[str] = []
+        if self.assignment_result is not None:
+            resolved_cell_types = [
+                str(value)
+                for value in self.assignment_result["df_cells"]["celltype"].astype(str).unique().tolist()
+                if str(value) not in {"Unassigned", "Ambiguous"}
+            ]
+
         self.workflow_state = dict(workflow)
         self.recommendation_state = {
             "nuclei": bool(nuclei_recommendation),
@@ -930,19 +1253,18 @@ class NativeEngine:
             "nuclei": dict(manifest_pending_parameters["nuclei"]),
             "assignment": dict(manifest_pending_parameters["assignment"]),
         }
+        self.analysis_parameters = self._validate_restored_analysis_parameters(
+            manifest_analysis_parameters,
+            workflow,
+            resolved_cell_types,
+            boundaries,
+            warnings,
+        )
         self._persist_workflow_state()
         if neighborhood_complete:
             self.neighborhood_result = {}
         if distribution_complete:
             self.distribution_result = {}
-
-        resolved_cell_types: list[str] = []
-        if self.assignment_result is not None:
-            resolved_cell_types = [
-                str(value)
-                for value in self.assignment_result["df_cells"]["celltype"].astype(str).unique().tolist()
-                if str(value) not in {"Unassigned", "Ambiguous"}
-            ]
 
         preview_stage = {
             "overlay": "overlay",
@@ -995,6 +1317,7 @@ class NativeEngine:
                 ],
             },
             "workflow": workflow,
+            "analysisParameters": copy.deepcopy(self.analysis_parameters),
             "previewPaths": restored_preview_paths,
             "nucleiParameters": self.pending_parameters["nuclei"] or nuclei_params,
             "assignmentParameters": self.pending_parameters["assignment"] or assignment_params,
@@ -1304,19 +1627,7 @@ class NativeEngine:
             ambiguous_min_probability=float(raw.get("ambiguous_min_probability", 0.60)),
             ambiguous_min_gap=float(raw.get("ambiguous_min_gap", 0.10)),
         )
-        search_specs = payload.get("searchSpecs") or {
-            "r_voronoi_um": {"kind": "float", "min": 0.0, "max": 10.0, "step": 0.5},
-            "r_buffer_um": {"kind": "float", "min": 0.0, "max": 8.0, "step": 0.5},
-            "r_vote_um": {"kind": "float", "min": 0.0, "max": 10.0, "step": 0.5},
-            "tophat_r_um": {"kind": "float", "min": 0.0, "max": 4.0, "step": 0.5},
-            "gauss_sigma_um": {"kind": "float", "min": 0.0, "max": 1.5, "step": 0.1},
-            "thresh_mode": {"kind": "choice", "options": ["global_otsu", "yen", "triangle"]},
-            "min_pos_object_size_px": {"kind": "int", "min": 0, "max": 80, "step": 1},
-            "min_pos_pix": {"kind": "int", "min": 0, "max": 40, "step": 1},
-            "resolve_ambiguous": {"kind": "bool", "options": [True]},
-            "ambiguous_min_probability": {"kind": "float", "min": 0.0, "max": 0.80, "step": 0.01},
-            "ambiguous_min_gap": {"kind": "float", "min": 0.0, "max": 0.20, "step": 0.01},
-        }
+        search_specs = payload.get("searchSpecs") or copy.deepcopy(ASSIGNMENT_OPTIMIZER_SEARCH_SPECS)
         max_evaluations = max(1, min(int(payload.get("maxEvaluations", 64)), 4096))
         _progress(request_id, 0.05, f"Screening up to {max_evaluations} assignment parameter combinations")
         output_dir = _section_dir(config, "celltype_assignment_parameters")
@@ -1379,20 +1690,48 @@ class NativeEngine:
         config = self._require_config()
         if self.assignment_result is None or self.nuclei_result is None:
             raise RuntimeError("Run cell type assignment before neighborhood analysis.")
+        grid_size_um = float(
+            _normalized_number(
+                payload.get("gridSizeUm", 20.0),
+                "Neighborhood gridSizeUm",
+                strictly_positive=True,
+            )
+        )
+        raw_cluster_colors = payload.get("clusterColors") or {}
+        if not isinstance(raw_cluster_colors, dict):
+            raise ValueError("Neighborhood clusterColors must be an object.")
+        requested_colors: Dict[str, str] = {}
+        for raw_label, raw_color in raw_cluster_colors.items():
+            if not isinstance(raw_label, str) or not raw_label.strip():
+                raise ValueError("Neighborhood clusterColors keys must be nonempty strings.")
+            if not isinstance(raw_color, str) or not raw_color.strip():
+                raise ValueError("Neighborhood clusterColors values must be nonempty strings.")
+            requested_colors[raw_label.strip()] = raw_color.strip()
+        raw_display_clusters = payload.get("displayClusters")
+        requested_display_clusters = (
+            _normalized_string_list(
+                raw_display_clusters,
+                "Neighborhood displayClusters",
+                allow_empty=True,
+            )
+            if raw_display_clusters is not None
+            else []
+        )
         self._invalidate_workflow_from("neighborhood")
         _progress(request_id, 0.12, "Building the neighborhood grid")
         self.neighborhood_result = run_neighborhood_analysis(
             df_cells=self.assignment_result["df_cells"],
             image_shape=tuple(self.nuclei_result["labels"].shape),
             pixel_size_um=config.pixel_size_um,
-            grid_size_um=float(payload.get("gridSizeUm", 20.0)),
+            grid_size_um=grid_size_um,
         )
         labels = [str(value) for value in self.neighborhood_result.get("cluster_labels", [])]
         palette = generate_distinct_hex(max(1, len(labels)))
         colors = {
-            label: str((payload.get("clusterColors") or {}).get(label) or palette[index])
+            label: str(requested_colors.get(label) or palette[index])
             for index, label in enumerate(labels)
         }
+        display_clusters = requested_display_clusters or list(dict.fromkeys(labels))
         _progress(request_id, 0.72, "Saving neighborhood outputs")
         output_dir = _section_dir(config, "neighborhood_analysis")
         saved = save_neighborhood_analysis_outputs(
@@ -1400,13 +1739,18 @@ class NativeEngine:
             output_dir,
             config.pixel_size_um,
             colors,
-            display_cluster_labels=payload.get("displayClusters") or labels,
+            display_cluster_labels=display_clusters,
             save_outputs=True,
         )
         preview_path = self._save_first_result_figure_preview(saved, output_dir / "neighborhood_preview.png")
         _close_figures(saved)
         self.region_result = None
         self.distribution_result = None
+        self.analysis_parameters["neighborhood"] = {
+            "gridSizeUm": grid_size_um,
+            "clusterColors": dict(colors),
+            "displayClusters": list(display_clusters),
+        }
         self._mark_workflow_stage("neighborhood", invalidate_after=True)
         _progress(request_id, 1.0, "Neighborhood analysis complete")
         return {
@@ -1423,27 +1767,65 @@ class NativeEngine:
         config = self._require_config()
         if self.assignment_result is None:
             raise RuntimeError("Run cell type assignment before region analysis.")
-        self._invalidate_workflow_from("region")
         present_types = [
             str(value)
             for value in self.assignment_result["df_cells"]["celltype"].astype(str).unique().tolist()
             if str(value) not in {"Unassigned", "Ambiguous"}
         ]
-        selected_types = [str(value) for value in (payload.get("selectedTypes") or present_types[:1])]
-        if not selected_types:
-            raise ValueError("Select at least one cell type for region analysis.")
+        raw_selected_types = payload.get("selectedTypes")
+        selected_types = _normalized_string_list(
+            present_types[:1] if raw_selected_types is None else raw_selected_types,
+            "Region selectedTypes",
+            allowed=set(present_types),
+        )
+        close_um = float(_normalized_number(payload.get("closeUm", 15.0), "Region closeUm"))
+        dilate_um = float(_normalized_number(payload.get("dilateUm", 10.0), "Region dilateUm"))
+        min_area_um2 = float(_normalized_number(payload.get("minAreaUm2", 20000.0), "Region minAreaUm2"))
+        min_cells = int(
+            _normalized_number(
+                payload.get("minCells", 5),
+                "Region minCells",
+                minimum=1.0,
+                integer=True,
+            )
+        )
+        contour_downsample = int(
+            _normalized_number(
+                payload.get("contourDownsample", 2),
+                "Region contourDownsample",
+                strictly_positive=True,
+                integer=True,
+            )
+        )
+        line_width = float(
+            _normalized_number(
+                payload.get("lineWidth", 2.0),
+                "Region lineWidth",
+                strictly_positive=True,
+            )
+        )
+        line_style = payload.get("lineStyle", "--")
+        boundary_color = payload.get("boundaryColor", "#A1D99B")
+        use_type_colors = payload.get("useTypeColors", False)
+        if not isinstance(line_style, str) or not line_style.strip():
+            raise ValueError("Region lineStyle must be a nonempty string.")
+        if not isinstance(boundary_color, str) or not boundary_color.strip():
+            raise ValueError("Region boundaryColor must be a nonempty string.")
+        if not isinstance(use_type_colors, bool):
+            raise ValueError("Region useTypeColors must be a boolean.")
         params = RegionParams(
             selected_types=selected_types,
-            close_um=float(payload.get("closeUm", 15.0)),
-            dilate_um=float(payload.get("dilateUm", 10.0)),
-            min_area_um2=float(payload.get("minAreaUm2", 20000.0)),
-            min_cells=int(payload.get("minCells", 5)),
-            contour_downsample=int(payload.get("contourDownsample", 2)),
-            line_width=float(payload.get("lineWidth", 2.0)),
-            line_style=str(payload.get("lineStyle", "--")),
-            boundary_color=str(payload.get("boundaryColor", "#A1D99B")),
-            use_type_colors=bool(payload.get("useTypeColors", False)),
+            close_um=close_um,
+            dilate_um=dilate_um,
+            min_area_um2=min_area_um2,
+            min_cells=min_cells,
+            contour_downsample=contour_downsample,
+            line_width=line_width,
+            line_style=line_style.strip(),
+            boundary_color=boundary_color.strip(),
+            use_type_colors=use_type_colors,
         )
+        self._invalidate_workflow_from("region")
         _progress(request_id, 0.15, "Computing region masks")
         output_dir = _section_dir(config, "region_analysis")
         self.region_result = run_region_boundary_analysis(
@@ -1461,6 +1843,18 @@ class NativeEngine:
         for label, path in (self.region_result.get("saved_paths", {}).get("mask_paths", {}) or {}).items():
             boundaries.append({"label": str(label), "path": str(path)})
         self.distribution_result = None
+        self.analysis_parameters["region"] = {
+            "selectedTypes": list(params.selected_types),
+            "closeUm": float(params.close_um),
+            "dilateUm": float(params.dilate_um),
+            "minAreaUm2": float(params.min_area_um2),
+            "minCells": int(params.min_cells),
+            "contourDownsample": int(params.contour_downsample),
+            "lineWidth": float(params.line_width),
+            "lineStyle": str(params.line_style),
+            "boundaryColor": str(params.boundary_color),
+            "useTypeColors": bool(params.use_type_colors),
+        }
         self._mark_workflow_stage("region", invalidate_after=True)
         _progress(request_id, 1.0, "Region analysis complete")
         return {
@@ -1474,12 +1868,46 @@ class NativeEngine:
         config = self._require_config()
         if self.assignment_result is None or self.region_result is None:
             raise RuntimeError("Run cell type assignment and region analysis before cell distribution analysis.")
-        self._invalidate_workflow_from("distribution")
         boundaries = list((self.region_result.get("saved_paths", {}).get("mask_paths", {}) or {}).items())
         if not boundaries:
             raise RuntimeError("Region analysis did not produce a boundary mask.")
-        requested_label = str(payload.get("boundaryLabel") or boundaries[0][0])
-        boundary_path = next((Path(value) for key, value in boundaries if str(key) == requested_label), Path(boundaries[0][1]))
+        raw_boundary_label = payload.get("boundaryLabel")
+        if raw_boundary_label is not None and (
+            not isinstance(raw_boundary_label, str) or not raw_boundary_label.strip()
+        ):
+            raise ValueError("Distribution boundaryLabel must be a nonempty string.")
+        requested_label = raw_boundary_label.strip() if isinstance(raw_boundary_label, str) else str(boundaries[0][0])
+        selected_boundary = next(
+            ((str(key), Path(value)) for key, value in boundaries if str(key) == requested_label),
+            None,
+        )
+        if selected_boundary is None:
+            raise ValueError(f"Distribution boundaryLabel is unavailable: {requested_label}")
+        requested_label, boundary_path = selected_boundary
+        band_width_um = float(
+            _normalized_number(
+                payload.get("bandWidthUm", 10.0),
+                "Distribution bandWidthUm",
+                strictly_positive=True,
+            )
+        )
+        overlay_channels = _normalized_string_list(
+            payload.get("overlayChannels") or [],
+            "Distribution overlayChannels",
+            allowed={channel.channel for channel in config.channels},
+            allow_empty=True,
+        )
+        present_types = [
+            str(value)
+            for value in self.assignment_result["df_cells"]["celltype"].astype(str).unique().tolist()
+            if str(value) not in {"Unassigned", "Ambiguous"}
+        ]
+        selected_types = _normalized_string_list(
+            payload.get("selectedCellTypes") or present_types,
+            "Distribution selectedCellTypes",
+            allowed=set(present_types),
+        )
+        self._invalidate_workflow_from("distribution")
         _progress(request_id, 0.08, "Building distance bands")
         distribution_config = read_distribution_config(Path(config.save_dir))
         region_masks = run_region_mask_band_analysis(
@@ -1488,17 +1916,10 @@ class NativeEngine:
             boundary_label=requested_label,
             boundary_mask_path=boundary_path,
             arrays_npz_path=None,
-            band_width_um=float(payload.get("bandWidthUm", 10.0)),
-            overlay_channels=[str(value) for value in payload.get("overlayChannels", [])],
+            band_width_um=band_width_um,
+            overlay_channels=overlay_channels,
         )
         _progress(request_id, 0.58, "Calculating cell density")
-        selected_types = [str(value) for value in payload.get("selectedCellTypes", [])]
-        if not selected_types:
-            selected_types = [
-                str(value)
-                for value in self.assignment_result["df_cells"]["celltype"].astype(str).unique().tolist()
-                if str(value) not in {"Unassigned", "Ambiguous"}
-            ]
         density = run_cell_density_analysis(
             config=distribution_config,
             assignment_df=self.assignment_result["df_cells"],
@@ -1509,6 +1930,12 @@ class NativeEngine:
         self.distribution_result = {"region_masks": region_masks, "density": density}
         output_dir = _section_dir(config, "cell_distribution_analysis")
         preview_candidates = sorted(output_dir.rglob("*.png"))
+        self.analysis_parameters["distribution"] = {
+            "boundaryLabel": requested_label,
+            "bandWidthUm": band_width_um,
+            "overlayChannels": list(overlay_channels),
+            "selectedCellTypes": list(selected_types),
+        }
         self._mark_workflow_stage("distribution", invalidate_after=True)
         _progress(request_id, 1.0, "Cell distribution analysis complete")
         return {
@@ -1521,27 +1948,79 @@ class NativeEngine:
         config = self._require_config()
         if self.assignment_result is None:
             raise RuntimeError("Run cell type assignment before distance analysis.")
-        self._invalidate_workflow_from("distance")
-        mode = str(payload.get("mode") or "nearest")
+        raw_mode = payload.get("mode", "nearest")
+        if not isinstance(raw_mode, str) or not raw_mode.strip():
+            raise ValueError("Distance mode must be 'nearest' or 'boundary'.")
+        mode = raw_mode.strip().lower()
+        if mode not in {"nearest", "boundary"}:
+            raise ValueError("Distance mode must be 'nearest' or 'boundary'.")
         present_types = [
             str(value)
             for value in self.assignment_result["df_cells"]["celltype"].astype(str).unique().tolist()
             if str(value) not in {"Unassigned", "Ambiguous"}
         ]
-        target = str(payload.get("targetType") or (present_types[0] if present_types else ""))
-        queries = [str(value) for value in (payload.get("queryTypes") or present_types[1:])]
-        if not target or not queries:
-            raise ValueError("Select a target cell type and at least one query cell type.")
-        output_dir = _section_dir(config, "distance_analysis")
-        _progress(request_id, 0.12, "Computing distances")
+        raw_target = payload.get("targetType")
+        if raw_target is None:
+            raw_target = present_types[0] if present_types else ""
+        if not isinstance(raw_target, str) or not raw_target.strip():
+            raise ValueError("Select a target cell type.")
+        target = raw_target.strip()
+        if target not in set(present_types):
+            raise ValueError(f"Distance targetType is unavailable: {target}")
+        raw_queries = payload.get("queryTypes")
+        queries = _normalized_string_list(
+            present_types[1:] if raw_queries is None else raw_queries,
+            "Distance queryTypes",
+            allowed=set(present_types),
+        )
+
+        boundary_label: str | None = None
+        boundary_path: Path | None = None
+        region_filter: str | None = None
         if mode == "boundary":
             if self.region_result is None:
                 raise RuntimeError("Run region analysis before cell-to-boundary distance analysis.")
             boundaries = list((self.region_result.get("saved_paths", {}).get("mask_paths", {}) or {}).items())
             if not boundaries:
                 raise RuntimeError("No boundary mask is available.")
-            boundary_label = str(payload.get("boundaryLabel") or boundaries[0][0])
-            boundary_path = next((Path(value) for key, value in boundaries if str(key) == boundary_label), Path(boundaries[0][1]))
+            raw_boundary_label = payload.get("boundaryLabel")
+            if raw_boundary_label is not None and (
+                not isinstance(raw_boundary_label, str) or not raw_boundary_label.strip()
+            ):
+                raise ValueError("Boundary distance boundaryLabel must be a nonempty string.")
+            requested_boundary_label = (
+                raw_boundary_label.strip()
+                if isinstance(raw_boundary_label, str)
+                else str(boundaries[0][0])
+            )
+            selected_boundary = next(
+                (
+                    (str(key), Path(value))
+                    for key, value in boundaries
+                    if str(key) == requested_boundary_label
+                ),
+                None,
+            )
+            if selected_boundary is None:
+                raise ValueError(f"Boundary distance boundaryLabel is unavailable: {requested_boundary_label}")
+            boundary_label, boundary_path = selected_boundary
+            raw_region_filter = payload.get("regionFilter", "all")
+            if not isinstance(raw_region_filter, str) or not raw_region_filter.strip():
+                raise ValueError("Boundary distance regionFilter must be 'all', 'inside', or 'outside'.")
+            region_filter = raw_region_filter.strip().lower()
+            if region_filter not in {"all", "inside", "outside"}:
+                raise ValueError("Boundary distance regionFilter must be 'all', 'inside', or 'outside'.")
+
+        self._invalidate_workflow_from("distance", preserve_distance_parameters=True)
+        output_dir = _section_dir(config, "distance_analysis")
+        _progress(request_id, 0.12, "Computing distances")
+        normalized_parameters: Dict[str, Any] = {
+            "mode": mode,
+            "targetType": target,
+            "queryTypes": list(queries),
+        }
+        if mode == "boundary":
+            assert boundary_label is not None and boundary_path is not None and region_filter is not None
             result = run_boundary_distance_analysis(
                 df_cells=self.assignment_result["df_cells"],
                 celltype_cfg=self.celltype_config,
@@ -1551,9 +2030,11 @@ class NativeEngine:
                 boundary_mask_path=boundary_path,
                 boundary_name=boundary_label,
                 query_types=queries,
-                region_filter=str(payload.get("regionFilter") or "all"),
+                region_filter=region_filter,
                 save_outputs=True,
             )
+            normalized_parameters["boundaryLabel"] = boundary_label
+            normalized_parameters["regionFilter"] = region_filter
         else:
             result = run_nearest_neighbor_analysis(
                 df_cells=self.assignment_result["df_cells"],
@@ -1566,6 +2047,12 @@ class NativeEngine:
             )
         preview_path = self._save_first_result_figure_preview(result, output_dir / f"{mode}_distance_preview.png")
         _close_figures(result)
+        distance_parameters = self.analysis_parameters.get("distance")
+        if not isinstance(distance_parameters, dict):
+            distance_parameters = {}
+        distance_parameters[mode] = normalized_parameters
+        distance_parameters["lastMode"] = mode
+        self.analysis_parameters["distance"] = distance_parameters
         self._mark_workflow_stage("distance", invalidate_after=True)
         _progress(request_id, 1.0, "Distance analysis complete")
         return {
@@ -1605,6 +2092,7 @@ class NativeEngine:
             "neighborhood_result": self.neighborhood_result,
             "region_result": self.region_result,
             "distribution_result": self.distribution_result,
+            "analysis_parameters": copy.deepcopy(self.analysis_parameters),
         }
         try:
             self._invalidate_workflow_from(stage, persist=False)
@@ -1620,6 +2108,7 @@ class NativeEngine:
             self.neighborhood_result = snapshot["neighborhood_result"]
             self.region_result = snapshot["region_result"]
             self.distribution_result = snapshot["distribution_result"]
+            self.analysis_parameters = snapshot["analysis_parameters"]
             raise
         return {
             "applied": True,

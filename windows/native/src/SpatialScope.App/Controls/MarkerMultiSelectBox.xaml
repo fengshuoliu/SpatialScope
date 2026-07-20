@@ -4,12 +4,13 @@
              xmlns:automation="clr-namespace:System.Windows.Automation;assembly=PresentationCore"
              x:Name="Root"
              MinWidth="150"
-             MinHeight="34"
+             MinHeight="40"
+             FontSize="14"
              FontFamily="{DynamicResource InterfaceFont}">
     <Grid>
         <ToggleButton x:Name="PickerButton"
-                      MinHeight="34"
-                      Padding="9,5"
+                      MinHeight="40"
+                      Padding="10,7"
                       HorizontalContentAlignment="Stretch"
                       VerticalContentAlignment="Center"
                       Background="#FAFFFFFF"
@@ -54,7 +55,7 @@
                             <Setter TargetName="PickerBorder" Property="Background" Value="#FFFFFF" />
                         </Trigger>
                         <Trigger Property="IsKeyboardFocused" Value="True">
-                            <Setter TargetName="PickerBorder" Property="BorderBrush" Value="#F59E0B" />
+                            <Setter TargetName="PickerBorder" Property="BorderBrush" Value="{DynamicResource FocusBrush}" />
                             <Setter TargetName="PickerBorder" Property="BorderThickness" Value="2" />
                         </Trigger>
                         <Trigger Property="IsChecked" Value="True">
@@ -101,7 +102,7 @@
 
                     <TextBlock Text="{Binding PickerLabel, ElementName=Root}"
                                FontWeight="SemiBold"
-                               FontSize="13"
+                               FontSize="15"
                                Foreground="{DynamicResource TextBrush}"
                                Margin="2,0,2,7" />
 
@@ -114,11 +115,12 @@
                                 <DataTemplate>
                                     <CheckBox Content="{Binding Name}"
                                               IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                              MinHeight="30"
-                                              Padding="3,4"
+                                              MinHeight="36"
+                                              Padding="4,6"
                                               VerticalContentAlignment="Center"
                                               automation:AutomationProperties.Name="{Binding Name}"
-                                              Click="MarkerCheckBox_Click" />
+                                              PreviewMouseLeftButtonDown="MarkerCheckBox_PreviewMouseLeftButtonDown"
+                                              PreviewKeyDown="MarkerCheckBox_PreviewKeyDown" />
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
@@ -131,13 +133,14 @@
                         </Grid.ColumnDefinitions>
                         <TextBlock Text="{Binding SelectionCountText, ElementName=Root}"
                                    Foreground="{DynamicResource SecondaryTextBrush}"
-                                   FontSize="12"
+                                   FontSize="13"
                                    Margin="2,0,8,0"
                                    VerticalAlignment="Center" />
                         <Button Grid.Column="1"
                                 Content="{Binding ClearText, ElementName=Root}"
-                                MinHeight="30"
-                                Padding="10,4"
+                                MinHeight="36"
+                                Padding="12,6"
+                                FontSize="14"
                                 Foreground="#086C77"
                                 Background="#EFF6F7"
                                 BorderBrush="#C8DEE1"

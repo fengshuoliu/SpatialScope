@@ -68,6 +68,24 @@ public partial class MainWindow : Window
     private double _yPixels = 1000;
     private double _nucleiOptimizerBudget = 64;
     private double _assignmentOptimizerBudget = 64;
+    private double _neighborhoodGridSize = 20;
+    private readonly List<string> _regionSelectedCellTypes = [];
+    private bool _regionSelectionInitialized;
+    private double _regionClosingRadius = 15;
+    private double _regionDilationRadius = 10;
+    private double _regionMinimumArea = 20000;
+    private double _regionMinimumCells = 5;
+    private string? _distributionBoundaryLabel;
+    private readonly List<string> _distributionSelectedCellTypes = [];
+    private bool _distributionSelectionInitialized;
+    private double _distributionBandWidth = 10;
+    private string? _nearestDistanceTarget;
+    private readonly List<string> _nearestDistanceQueries = [];
+    private bool _nearestDistanceQueriesInitialized;
+    private string? _boundaryDistanceTarget;
+    private readonly List<string> _boundaryDistanceQueries = [];
+    private bool _boundaryDistanceQueriesInitialized;
+    private string? _distanceBoundaryLabel;
     private ParameterRunMode _nucleiRunMode = ParameterRunMode.Manual;
     private ParameterRunMode _assignmentRunMode = ParameterRunMode.Manual;
     private JsonElement? _pendingNucleiRecommendation;
@@ -76,6 +94,7 @@ public partial class MainWindow : Window
     private bool _engineShutdownComplete;
     private int _outputRestoreGeneration;
     private int _cellTypesTabIndex;
+    private int _distanceTabIndex;
     private bool _suppressLanguageSelection;
     private bool _isBusy;
     private string? _activeSectionKey;
@@ -130,6 +149,7 @@ public partial class MainWindow : Window
             await _engine.StartAsync();
             SetLocalizedStatus("EngineReady");
             UpdateCpuText();
+            await RestoreQaSessionIfRequestedAsync();
             await CaptureQaScenarioIfRequestedAsync();
         }
         catch (Exception exception)
@@ -158,6 +178,16 @@ public partial class MainWindow : Window
             _engineShutdownComplete = true;
             Close();
         }
+    }
+
+    private async Task RestoreQaSessionIfRequestedAsync()
+    {
+        var restoreFolder = Environment.GetEnvironmentVariable("SPATIALSCOPE_QA_RESTORE_OUTPUT_FOLDER");
+        if (string.IsNullOrWhiteSpace(restoreFolder) || !Directory.Exists(restoreFolder)) return;
+
+        var restoreGeneration = ++_outputRestoreGeneration;
+        _outputFolder = Path.GetFullPath(restoreFolder);
+        await TryRestoreExistingResultsAsync(_outputFolder, restoreGeneration);
     }
 
     private async Task CaptureQaScenarioIfRequestedAsync()
@@ -215,6 +245,7 @@ public partial class MainWindow : Window
             StatusText.Text = _localization.EffectiveLanguage == InterfaceLanguage.SimplifiedChinese
                 ? $"{_localization["Running"]} · {active.Title} · {progress.Value:P0}"
                 : $"{progress.Message} · {progress.Value:P0}";
+            ApplyStatusTone("Running", isError: false);
         });
     }
 
@@ -230,6 +261,8 @@ public partial class MainWindow : Window
         ScaleLabel.Text = _localization["Scale"];
         ComputeLabel.Text = _localization["Compute"];
         OpenOutputButton.Content = _localization["OpenOutput"];
+        AutomationProperties.SetName(OperationProgress, _localization["Progress"]);
+        AutomationProperties.SetName(StatusSurface, _localization["Status"]);
 
         var titleKeys = new[]
         {
@@ -243,6 +276,7 @@ public partial class MainWindow : Window
         {
             _sections[index].Title = _localization[titleKeys[index].Item1];
             _sections[index].Subtitle = _localization[titleKeys[index].Item2];
+            _sections[index].StatusDisplayText = _localization[_sections[index].StatusText];
             _sections[index].RefreshText();
         }
 
@@ -291,13 +325,14 @@ public partial class MainWindow : Window
 
     private void LanguageComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_suppressLanguageSelection || LanguageComboBox.SelectedItem is not ComboBoxItem item) return;
+        if (_isBusy || _suppressLanguageSelection || LanguageComboBox.SelectedItem is not ComboBoxItem item) return;
         if (Enum.TryParse(item.Tag?.ToString(), out InterfaceLanguage language)) _localization.SetLanguage(language);
     }
 
-    private void WorkflowRow_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    private void WorkflowRow_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is Border { Tag: string key }) SelectSection(key);
+        if (_isBusy) return;
+        if (sender is Button { CommandParameter: string key }) SelectSection(key);
     }
 
     private void SelectSection(string key)
@@ -311,6 +346,7 @@ public partial class MainWindow : Window
     private void UpdateHeader()
     {
         if (_sections.Count == 0) return;
+        RefreshWorkflowStatusLabels();
         var section = CurrentSection;
         HeaderIcon.Text = section.IconGlyph;
         HeaderStep.Text = $"{_localization["Step"]} {section.Number} {_localization["Of"]} {_sections.Count}";
@@ -319,6 +355,12 @@ public partial class MainWindow : Window
         HeaderStatusText.Text = _localization[section.StatusText];
         HeaderStatusText.Foreground = section.StatusForeground;
         HeaderStatusBadge.Background = section.StatusBackground;
+    }
+
+    private void RefreshWorkflowStatusLabels()
+    {
+        foreach (var section in _sections)
+            section.StatusDisplayText = _localization[section.StatusText];
     }
 
     private void UpdateProgressMetadata()
@@ -330,6 +372,24 @@ public partial class MainWindow : Window
         ScaleValue.Text = _xPixels > 0 && _yPixels > 0
             ? $"{_xMicrometers / _xPixels:0.###} × {_yMicrometers / _yPixels:0.###} µm/px"
             : _localization["NotSet"];
+        OpenOutputButton.IsEnabled = !_isBusy && !string.IsNullOrWhiteSpace(_outputFolder) && Directory.Exists(_outputFolder);
+    }
+
+    private void SetInteractionBusy(bool busy)
+    {
+        _isBusy = busy;
+        if (busy) Keyboard.ClearFocus();
+        WorkflowItemsControl.IsEnabled = !busy;
+        DetailHost.IsEnabled = !busy;
+        LanguageComboBox.IsEnabled = !busy;
+        OpenOutputButton.IsEnabled = !busy
+            && !string.IsNullOrWhiteSpace(_outputFolder)
+            && Directory.Exists(_outputFolder);
+    }
+
+    private void RefreshSectionViewIfSelected(string sectionKey)
+    {
+        if (_selectedSectionKey == sectionKey) DetailHost.Content = BuildSectionView(sectionKey);
     }
 
     private void UpdateCpuText()
@@ -390,6 +450,80 @@ public partial class MainWindow : Window
         return new Border { Style = (Style)FindResource("CardStyle"), Child = stack };
     }
 
+    private TextBlock CreateSubsectionTitle(string text, Thickness? margin = null) => new()
+    {
+        Text = text,
+        Style = (Style)FindResource("SubsectionTitleTextStyle"),
+        Margin = margin ?? new Thickness(0),
+    };
+
+    private TextBlock CreateFieldLabel(string text, Thickness? margin = null) => new()
+    {
+        Text = text,
+        Style = (Style)FindResource("FieldLabelTextStyle"),
+        Margin = margin ?? new Thickness(0),
+        VerticalAlignment = VerticalAlignment.Center,
+    };
+
+    private TextBlock CreateSupportingText(string text, Thickness? margin = null) => new()
+    {
+        Text = text,
+        Style = (Style)FindResource("SupportingTextStyle"),
+        Margin = margin ?? new Thickness(0),
+        LineHeight = 19,
+    };
+
+    private Border CreateInlineNotice(string text, bool warning = false)
+    {
+        var noticeText = CreateSupportingText(text);
+        noticeText.Foreground = warning
+            ? (Brush)FindResource("ErrorBrush")
+            : (Brush)FindResource("MutedTextBrush");
+        var panel = new DockPanel();
+        var icon = new TextBlock
+        {
+            Text = warning ? "\uE7BA" : "\uE946",
+            FontFamily = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"),
+            FontSize = 15,
+            Foreground = noticeText.Foreground,
+            Width = 25,
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(0, 1, 0, 0),
+        };
+        DockPanel.SetDock(icon, Dock.Left);
+        panel.Children.Add(icon);
+        panel.Children.Add(noticeText);
+        return new Border
+        {
+            Background = new SolidColorBrush(warning ? Color.FromRgb(253, 242, 242) : Color.FromRgb(242, 247, 248)),
+            BorderBrush = new SolidColorBrush(warning ? Color.FromRgb(235, 199, 203) : Color.FromRgb(207, 224, 227)),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(7),
+            Padding = new Thickness(12, 10, 12, 10),
+            Margin = new Thickness(0, 0, 0, 14),
+            Child = panel,
+        };
+    }
+
+    private void SetActionAvailability(Button button, bool available, string unavailableHelp)
+    {
+        // Busy state is enforced by disabling the complete detail surface.
+        // Keep each action's local state tied only to its prerequisites so a
+        // view created during restoration becomes usable when the surface is
+        // re-enabled.
+        button.IsEnabled = available;
+        if (available)
+        {
+            button.ClearValue(ToolTipProperty);
+            AutomationProperties.SetHelpText(button, string.Empty);
+        }
+        else
+        {
+            button.ToolTip = unavailableHelp;
+            AutomationProperties.SetHelpText(button, unavailableHelp);
+        }
+    }
+
     private Button CreateButton(string text, RoutedEventHandler onClick, bool primary = false)
     {
         var button = new Button
@@ -411,14 +545,9 @@ public partial class MainWindow : Window
         string advancedHelp,
         Action<ParameterRunMode> selectionChanged)
     {
-        var description = new TextBlock
-        {
-            Text = selectedMode == ParameterRunMode.Manual ? manualHelp : advancedHelp,
-            TextWrapping = TextWrapping.Wrap,
-            Foreground = (Brush)FindResource("SecondaryTextBrush"),
-            Margin = new Thickness(0, 10, 0, 0),
-            LineHeight = 19,
-        };
+        var description = CreateSupportingText(
+            selectedMode == ParameterRunMode.Manual ? manualHelp : advancedHelp,
+            new Thickness(0, 10, 0, 0));
         AutomationProperties.SetLiveSetting(description, AutomationLiveSetting.Polite);
 
         var manual = new RadioButton
@@ -616,7 +745,7 @@ public partial class MainWindow : Window
 
     private void AddFolderRow(Grid grid, int row, string label, string path, Action choose)
     {
-        var labelBlock = new TextBlock { Text = label, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
+        var labelBlock = CreateFieldLabel(label);
         Grid.SetRow(labelBlock, row);
         Grid.SetColumn(labelBlock, 0);
         grid.Children.Add(labelBlock);
@@ -629,6 +758,8 @@ public partial class MainWindow : Window
             Margin = new Thickness(0, row == 0 ? 0 : 10, 12, 0),
             ToolTip = _localization["ChooseFolder"],
         };
+        AutomationProperties.SetName(pathBox, label);
+        AutomationProperties.SetHelpText(pathBox, _localization["ChooseFolder"]);
         pathBox.PreviewMouseLeftButtonDown += (_, _) => choose();
         Grid.SetRow(pathBox, row);
         Grid.SetColumn(pathBox, 1);
@@ -647,19 +778,22 @@ public partial class MainWindow : Window
         Action<double> setter,
         string unit,
         string? invalidationSectionKey = null,
-        Func<double, double>? normalize = null)
+        Func<double, double>? normalize = null,
+        double minimum = double.Epsilon)
     {
         var committedValue = normalize?.Invoke(value) ?? value;
         var panel = new StackPanel { Margin = new Thickness(0, 0, 14, 0) };
-        panel.Children.Add(new TextBlock { Text = label, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 6) });
+        panel.Children.Add(CreateFieldLabel(label, new Thickness(0, 0, 0, 6)));
         var row = new DockPanel();
         var unitText = new TextBlock { Text = unit, Margin = new Thickness(7, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center, Foreground = (Brush)FindResource("SecondaryTextBrush") };
         DockPanel.SetDock(unitText, Dock.Right);
         row.Children.Add(unitText);
         var editor = new TextBox { Text = committedValue.ToString("0.###", CultureInfo.CurrentCulture) };
+        AutomationProperties.SetName(editor, label);
+        AutomationProperties.SetHelpText(editor, string.IsNullOrWhiteSpace(unit) ? label : $"{label} ({unit})");
         editor.LostFocus += (_, _) =>
         {
-            if (TryReadDouble(editor.Text, out var parsed) && parsed > 0)
+            if (TryReadDouble(editor.Text, out var parsed) && parsed >= minimum)
             {
                 var normalized = normalize?.Invoke(parsed) ?? parsed;
                 editor.Text = normalized.ToString("0.###", CultureInfo.CurrentCulture);
@@ -679,17 +813,19 @@ public partial class MainWindow : Window
 
     private void ChooseInputFolder()
     {
+        if (_isBusy) return;
         var selected = ChooseFolder(_inputFolder);
         if (selected is null) return;
         _inputFolder = selected;
         _pendingNucleiRecommendation = null;
         _pendingAssignmentRecommendation = null;
         InvalidateAfter("inputs");
-        DetailHost.Content = BuildInputsView();
+        RefreshSectionViewIfSelected("inputs");
     }
 
     private async void ChooseOutputFolder()
     {
+        if (_isBusy) return;
         var selected = ChooseFolder(_outputFolder);
         if (selected is null) return;
         var restoreGeneration = ++_outputRestoreGeneration;
@@ -699,7 +835,7 @@ public partial class MainWindow : Window
         if (restoreResult == true) return;
         ResetLoadedResults();
         InvalidateAfter("inputs");
-        DetailHost.Content = BuildInputsView();
+        RefreshSectionViewIfSelected("inputs");
         if (restoreResult == false) SetLocalizedStatus("NoExistingResults");
     }
 
@@ -713,6 +849,8 @@ public partial class MainWindow : Window
     private async Task<bool?> TryRestoreExistingResultsAsync(string selectedFolder, int restoreGeneration)
     {
         if (string.IsNullOrWhiteSpace(selectedFolder)) return false;
+        var alreadyBusy = _isBusy;
+        if (!alreadyBusy) SetInteractionBusy(true);
         SetLocalizedStatus("CheckingExistingResults");
         try
         {
@@ -728,6 +866,10 @@ public partial class MainWindow : Window
             if (restoreGeneration != _outputRestoreGeneration) return null;
             SetStatus($"{_localization["RestoreFailed"]}: {LocalizeEngineError(exception.Message)}", isError: true);
             return null;
+        }
+        finally
+        {
+            if (!alreadyBusy) SetInteractionBusy(false);
         }
     }
 
@@ -752,6 +894,8 @@ public partial class MainWindow : Window
 
     private void ApplyRestoredHistory(JsonElement response, string selectedFolder)
     {
+        ResetLoadedResults();
+        _nucleusChannel = string.Empty;
         var configuration = response.GetProperty("configuration");
         _inputFolder = configuration.GetProperty("inputFolder").GetString() ?? string.Empty;
         // A result folder may have been copied or moved. The folder selected
@@ -794,11 +938,10 @@ public partial class MainWindow : Window
                 _nucleusChannel = nucleusChannel;
             }
         }
-        if (string.IsNullOrWhiteSpace(_nucleusChannel))
+        if (string.IsNullOrWhiteSpace(_nucleusChannel)
+            || !_channels.Any(channel => string.Equals(channel.Marker, _nucleusChannel, StringComparison.Ordinal)))
         {
-            _nucleusChannel = _channels.FirstOrDefault(channel => channel.Marker.Contains("DAPI", StringComparison.OrdinalIgnoreCase))?.Marker
-                ?? _channels.FirstOrDefault()?.Marker
-                ?? string.Empty;
+            _nucleusChannel = ChooseDefaultNucleusChannel();
         }
 
         if (response.TryGetProperty("assignmentParameters", out var assignmentParameters)
@@ -863,6 +1006,10 @@ public partial class MainWindow : Window
                 _boundaries.Add((item.GetProperty("label").GetString() ?? string.Empty, item.GetProperty("path").GetString() ?? string.Empty));
         }
 
+        var hasAnalysisParameters = response.TryGetProperty("analysisParameters", out var analysisParameters)
+            && analysisParameters.ValueKind == JsonValueKind.Object;
+        if (hasAnalysisParameters) ApplyRestoredAnalysisParameters(analysisParameters);
+
         _outputFiles.Clear();
         if (response.TryGetProperty("files", out var files))
         {
@@ -878,10 +1025,29 @@ public partial class MainWindow : Window
         }
 
         var workflow = response.GetProperty("workflow");
+        var firstMissingDownstreamStep = int.MaxValue;
+        foreach (var (key, step) in new[]
+                 {
+                     ("neighborhood", 5),
+                     ("region", 6),
+                     ("distribution", 7),
+                     ("distance", 8),
+                 })
+        {
+            var stageComplete = workflow.TryGetProperty(key, out var complete)
+                && complete.ValueKind == JsonValueKind.True;
+            if (stageComplete && (!hasAnalysisParameters || !HasRestoredStageSettings(analysisParameters, key)))
+            {
+                firstMissingDownstreamStep = step;
+                break;
+            }
+        }
+        var downstreamHistoryDowngraded = firstMissingDownstreamStep != int.MaxValue;
         var previousComplete = true;
         foreach (var section in _sections)
         {
             var savedComplete = workflow.TryGetProperty(section.Key, out var completeValue) && completeValue.GetBoolean();
+            if (section.Number >= firstMissingDownstreamStep) savedComplete = false;
             if (previousComplete && savedComplete)
             {
                 section.Status = WorkflowStatus.Complete;
@@ -897,10 +1063,30 @@ public partial class MainWindow : Window
             }
         }
 
+        if (downstreamHistoryDowngraded)
+        {
+            var previewSteps = new Dictionary<string, int>
+            {
+                ["neighborhood"] = 5,
+                ["region"] = 6,
+                ["distribution"] = 7,
+                ["distance_nearest"] = 8,
+                ["distance_boundary"] = 8,
+            };
+            foreach (var key in previewSteps.Where(item => item.Value >= firstMissingDownstreamStep).Select(item => item.Key))
+                _previewPaths.Remove(key);
+            if (firstMissingDownstreamStep <= 6) _boundaries.Clear();
+            _outputFiles.Clear();
+        }
+
         UpdateProgressMetadata();
         var lastComplete = _sections.LastOrDefault(section => section.Status == WorkflowStatus.Complete) ?? _sections[0];
         SelectSection(lastComplete.Key);
-        if (response.TryGetProperty("warnings", out var warnings) && warnings.GetArrayLength() > 0)
+        if (downstreamHistoryDowngraded)
+        {
+            SetStatus($"{_localization["ExistingResultsRestored"]} {_localization["RestoredDownstreamSettingsMissing"]}");
+        }
+        else if (response.TryGetProperty("warnings", out var warnings) && warnings.GetArrayLength() > 0)
         {
             SetStatus($"{_localization["ExistingResultsRestored"]} {warnings[0].GetString()}");
         }
@@ -908,6 +1094,104 @@ public partial class MainWindow : Window
         {
             SetLocalizedStatus("ExistingResultsRestored");
         }
+    }
+
+    private void ApplyRestoredAnalysisParameters(JsonElement analysisParameters)
+    {
+        if (analysisParameters.TryGetProperty("neighborhood", out var neighborhood)
+            && neighborhood.ValueKind == JsonValueKind.Object
+            && TryGetJsonNumber(neighborhood, "gridSizeUm", out var gridSize)
+            && gridSize > 0)
+        {
+            _neighborhoodGridSize = gridSize;
+        }
+
+        if (analysisParameters.TryGetProperty("region", out var region)
+            && region.ValueKind == JsonValueKind.Object)
+        {
+            if (TryGetJsonStringArray(region, "selectedTypes", out var selectedTypes))
+            {
+                _regionSelectedCellTypes.Clear();
+                _regionSelectedCellTypes.AddRange(selectedTypes);
+                _regionSelectionInitialized = true;
+            }
+            if (TryGetJsonNumber(region, "closeUm", out var closeUm) && closeUm >= 0)
+                _regionClosingRadius = closeUm;
+            if (TryGetJsonNumber(region, "dilateUm", out var dilateUm) && dilateUm >= 0)
+                _regionDilationRadius = dilateUm;
+            if (TryGetJsonNumber(region, "minAreaUm2", out var minAreaUm2) && minAreaUm2 >= 0)
+                _regionMinimumArea = minAreaUm2;
+            if (TryGetJsonNumber(region, "minCells", out var minCells) && minCells >= 0)
+                _regionMinimumCells = minCells;
+        }
+
+        if (analysisParameters.TryGetProperty("distribution", out var distribution)
+            && distribution.ValueKind == JsonValueKind.Object)
+        {
+            if (TryGetJsonString(distribution, "boundaryLabel", out var boundaryLabel))
+                _distributionBoundaryLabel = boundaryLabel;
+            if (TryGetJsonStringArray(distribution, "selectedCellTypes", out var selectedCellTypes))
+            {
+                _distributionSelectedCellTypes.Clear();
+                _distributionSelectedCellTypes.AddRange(selectedCellTypes);
+                _distributionSelectionInitialized = true;
+            }
+            if (TryGetJsonNumber(distribution, "bandWidthUm", out var bandWidthUm) && bandWidthUm > 0)
+                _distributionBandWidth = bandWidthUm;
+        }
+
+        if (!analysisParameters.TryGetProperty("distance", out var distance)
+            || distance.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        if (distance.TryGetProperty("nearest", out var nearest) && nearest.ValueKind == JsonValueKind.Object)
+        {
+            if (TryGetJsonString(nearest, "targetType", out var targetType))
+                _nearestDistanceTarget = targetType;
+            if (TryGetJsonStringArray(nearest, "queryTypes", out var queryTypes))
+            {
+                _nearestDistanceQueries.Clear();
+                _nearestDistanceQueries.AddRange(queryTypes);
+                _nearestDistanceQueriesInitialized = true;
+            }
+        }
+
+        if (distance.TryGetProperty("boundary", out var boundary) && boundary.ValueKind == JsonValueKind.Object)
+        {
+            if (TryGetJsonString(boundary, "targetType", out var targetType))
+                _boundaryDistanceTarget = targetType;
+            if (TryGetJsonStringArray(boundary, "queryTypes", out var queryTypes))
+            {
+                _boundaryDistanceQueries.Clear();
+                _boundaryDistanceQueries.AddRange(queryTypes);
+                _boundaryDistanceQueriesInitialized = true;
+            }
+            if (TryGetJsonString(boundary, "boundaryLabel", out var boundaryLabel))
+                _distanceBoundaryLabel = boundaryLabel;
+        }
+
+        if (TryGetJsonString(distance, "lastMode", out var lastMode))
+            _distanceTabIndex = string.Equals(lastMode, "boundary", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+        else if (!distance.TryGetProperty("nearest", out _) && distance.TryGetProperty("boundary", out _))
+            _distanceTabIndex = 1;
+    }
+
+    private static bool HasRestoredStageSettings(JsonElement analysisParameters, string key)
+    {
+        if (!analysisParameters.TryGetProperty(key, out var settings)
+            || settings.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+        if (key != "distance") return settings.EnumerateObject().Any();
+        return (settings.TryGetProperty("nearest", out var nearest)
+                && nearest.ValueKind == JsonValueKind.Object
+                && nearest.EnumerateObject().Any())
+            || (settings.TryGetProperty("boundary", out var boundary)
+                && boundary.ValueKind == JsonValueKind.Object
+                && boundary.EnumerateObject().Any());
     }
 
     private void ResetLoadedResults()
@@ -919,10 +1203,34 @@ public partial class MainWindow : Window
         _boundaries.Clear();
         _pendingNucleiRecommendation = null;
         _pendingAssignmentRecommendation = null;
+        _neighborhoodGridSize = 20;
+        _regionSelectedCellTypes.Clear();
+        _regionSelectionInitialized = false;
+        _regionClosingRadius = 15;
+        _regionDilationRadius = 10;
+        _regionMinimumArea = 20000;
+        _regionMinimumCells = 5;
+        _distributionBoundaryLabel = null;
+        _distributionSelectedCellTypes.Clear();
+        _distributionSelectionInitialized = false;
+        _distributionBandWidth = 10;
+        _nearestDistanceTarget = null;
+        _nearestDistanceQueries.Clear();
+        _nearestDistanceQueriesInitialized = false;
+        _boundaryDistanceTarget = null;
+        _boundaryDistanceQueries.Clear();
+        _boundaryDistanceQueriesInitialized = false;
+        _distanceBoundaryLabel = null;
+        _distanceTabIndex = 0;
     }
 
     private async Task SaveConfigurationAsync()
     {
+        if (_isBusy)
+        {
+            SetLocalizedStatus("Running");
+            return;
+        }
         if (string.IsNullOrWhiteSpace(_inputFolder) || string.IsNullOrWhiteSpace(_outputFolder))
         {
             SetLocalizedStatus("SelectFoldersFirst", isError: true);
@@ -957,19 +1265,19 @@ public partial class MainWindow : Window
                 IncludeInOverlay = item.GetProperty("includeOverlay").GetBoolean(),
             });
         }
-        _nucleusChannel = _channels.FirstOrDefault(channel => channel.Marker.Contains("DAPI", StringComparison.OrdinalIgnoreCase))?.Marker
-            ?? _channels.FirstOrDefault()?.Marker
-            ?? string.Empty;
+        _nucleusChannel = ChooseDefaultNucleusChannel();
         EnsureDefaultCellTypes();
         SetLocalizedStatus("ConfigurationSaved");
         UpdateProgressMetadata();
-        DetailHost.Content = BuildInputsView();
+        RefreshSectionViewIfSelected("inputs");
     }
 
     private UIElement BuildOverlayView()
     {
         var action = new StackPanel();
-        action.Children.Add(CreateButton(_localization["GenerateOverlay"], async (_, _) =>
+        var canRun = _sections.First(section => section.Key == "overlay").Status != WorkflowStatus.NotStarted;
+        if (!canRun) action.Children.Add(CreateInlineNotice(_localization["CompletePreviousSteps"], warning: true));
+        var generate = CreateButton(_localization["GenerateOverlay"], async (_, _) =>
         {
             var result = await RunWorkflowAsync("overlay", "overlay", new { clipHighPercentile = 99.8 });
             if (result is null) return;
@@ -977,23 +1285,40 @@ public partial class MainWindow : Window
             _previewPaths["overlay"] = previews.GetProperty("overlay").GetString() ?? string.Empty;
             _previewPaths["split"] = previews.GetProperty("splitChannels").GetString() ?? string.Empty;
             CaptureExportPaths(result.Value);
-            DetailHost.Content = BuildOverlayView();
-        }, primary: true));
+            RefreshSectionViewIfSelected("overlay");
+        }, primary: true);
+        SetActionAvailability(generate, canRun, _localization["CompletePreviousSteps"]);
+        action.Children.Add(generate);
 
         var previewsPanel = new Grid();
         previewsPanel.ColumnDefinitions.Add(new ColumnDefinition());
         previewsPanel.ColumnDefinitions.Add(new ColumnDefinition());
-        var overlayPanel = CreateImagePanel(_localization["OverlayPreview"], _previewPaths.GetValueOrDefault("overlay"), _exportPaths.GetValueOrDefault("overlay.png"));
+        var overlayPanel = CreateImagePanel(
+            _localization["OverlayPreview"],
+            _previewPaths.GetValueOrDefault("overlay"),
+            _exportPaths.GetValueOrDefault("overlay.png"),
+            previewKey: "overlay");
         overlayPanel.Margin = new Thickness(0, 0, 9, 0);
         previewsPanel.Children.Add(overlayPanel);
-        var splitPanel = CreateImagePanel(_localization["SplitChannelsPreview"], _previewPaths.GetValueOrDefault("split"), _exportPaths.GetValueOrDefault("split_channels.png"));
+        var splitPanel = CreateImagePanel(
+            _localization["SplitChannelsPreview"],
+            _previewPaths.GetValueOrDefault("split"),
+            _exportPaths.GetValueOrDefault("split_channels.png"),
+            previewKey: "split");
         splitPanel.Margin = new Thickness(9, 0, 0, 0);
         Grid.SetColumn(splitPanel, 1);
         previewsPanel.Children.Add(splitPanel);
-        return CreatePage(CreateCard(_localization["CompositePreview"], action), CreateCard(_localization["CompositePreview"], previewsPanel));
+        return CreatePage(
+            CreateCard(_localization["GeneratePreview"], action),
+            CreateCard(_localization["Preview"], previewsPanel));
     }
 
-    private Border CreateImagePanel(string title, string? previewPath, string? originalPath = null)
+    private Border CreateImagePanel(
+        string title,
+        string? previewPath,
+        string? originalPath = null,
+        string? emptyDetail = null,
+        string? previewKey = null)
     {
         var panel = new StackPanel();
         var heading = new DockPanel { Margin = new Thickness(0, 0, 0, 10) };
@@ -1004,7 +1329,7 @@ public partial class MainWindow : Window
             DockPanel.SetDock(open, Dock.Right);
             heading.Children.Add(open);
         }
-        heading.Children.Add(new TextBlock { Text = title, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center });
+        heading.Children.Add(CreateSubsectionTitle(title));
         panel.Children.Add(heading);
         if (!string.IsNullOrWhiteSpace(previewPath) && File.Exists(previewPath))
         {
@@ -1183,13 +1508,7 @@ public partial class MainWindow : Window
             };
 
             panel.Children.Add(viewerFrame);
-            panel.Children.Add(new TextBlock
-            {
-                Text = _localization["PlotZoomHelp"],
-                Foreground = (Brush)FindResource("SecondaryTextBrush"),
-                FontSize = 12.5,
-                Margin = new Thickness(0, 7, 0, 0),
-            });
+            panel.Children.Add(CreateSupportingText(_localization["PlotZoomHelp"], new Thickness(0, 7, 0, 0)));
         }
         else
         {
@@ -1204,22 +1523,47 @@ public partial class MainWindow : Window
                     HorizontalAlignment = HorizontalAlignment.Center,
                     Children =
                     {
-                        new TextBlock { Text = _localization["NoPreview"], FontSize = 18, FontWeight = FontWeights.SemiBold, HorizontalAlignment = HorizontalAlignment.Center },
-                        new TextBlock { Text = _localization["NoPreviewDetail"], Foreground = (Brush)FindResource("SecondaryTextBrush"), Margin = new Thickness(0, 7, 0, 0), TextWrapping = TextWrapping.Wrap, MaxWidth = 360, TextAlignment = TextAlignment.Center },
+                        new TextBlock { Text = _localization["NoPreview"], Style = (Style)FindResource("CardTitleTextStyle"), HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0) },
+                        new TextBlock { Text = emptyDetail ?? _localization["NoPreviewDetail"], Style = (Style)FindResource("SupportingTextStyle"), Margin = new Thickness(0, 7, 0, 0), MaxWidth = 380, TextAlignment = TextAlignment.Center },
                     },
                 },
             });
         }
-        return new Border { Child = panel };
+        return new Border
+        {
+            Child = panel,
+            Tag = string.IsNullOrWhiteSpace(previewKey) ? null : $"preview:{previewKey}",
+        };
+    }
+
+    private void HideTaggedDetailElement(string tag)
+    {
+        if (DetailHost.Content is not DependencyObject root) return;
+
+        static void HideMatchingDescendants(DependencyObject current, string expectedTag)
+        {
+            if (current is FrameworkElement { Tag: string value } element
+                && string.Equals(value, expectedTag, StringComparison.Ordinal))
+            {
+                element.Visibility = Visibility.Collapsed;
+            }
+
+            for (var index = 0; index < VisualTreeHelper.GetChildrenCount(current); index++)
+                HideMatchingDescendants(VisualTreeHelper.GetChild(current, index), expectedTag);
+        }
+
+        HideMatchingDescendants(root, tag);
     }
 
     private UIElement BuildNucleiView()
     {
+        var canRun = _sections.First(section => section.Key == "nuclei").Status != WorkflowStatus.NotStarted;
         var channelRow = new Grid();
         channelRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(200) });
         channelRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(320) });
-        channelRow.Children.Add(new TextBlock { Text = _localization["NucleusChannel"], FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center });
+        channelRow.Children.Add(CreateFieldLabel(_localization["Channel"]));
         var channelPicker = new ComboBox { ItemsSource = _channels.Select(item => item.Marker).ToArray(), SelectedItem = _nucleusChannel };
+        AutomationProperties.SetName(channelPicker, _localization["NucleusChannel"]);
         channelPicker.SelectionChanged += (_, _) =>
         {
             var selected = channelPicker.SelectedItem?.ToString() ?? string.Empty;
@@ -1235,13 +1579,7 @@ public partial class MainWindow : Window
         var parameterGrid = new UniformGrid { Columns = 2 };
         foreach (var parameter in ParameterCatalog.Nuclei) parameterGrid.Children.Add(CreateParameterEditor(parameter, _nucleiValues));
         var optimizerStack = new StackPanel();
-        optimizerStack.Children.Add(new TextBlock
-        {
-            Text = _localization["NucleiOptimizerHelp"],
-            TextWrapping = TextWrapping.Wrap,
-            Foreground = (Brush)FindResource("SecondaryTextBrush"),
-            Margin = new Thickness(0, 0, 0, 10),
-        });
+        optimizerStack.Children.Add(CreateSupportingText(_localization["NucleiOptimizerHelp"], new Thickness(0, 0, 0, 10)));
         optimizerStack.Children.Add(CreateNumberField(
             _localization["OptimizerBudget"],
             _nucleiOptimizerBudget,
@@ -1262,21 +1600,24 @@ public partial class MainWindow : Window
             _pendingNucleiRecommendation = ExtractRecommendation(result.Value);
             _previewPaths["nucleiOptimizer"] = result.Value.TryGetProperty("previewPath", out var preview) && preview.ValueKind == JsonValueKind.String ? preview.GetString() ?? string.Empty : string.Empty;
             CaptureExportPaths(result.Value);
-            DetailHost.Content = BuildNucleiView();
+            RefreshSectionViewIfSelected("nuclei");
         }, primary: true);
         optimizerButton.Margin = new Thickness(0, 12, 0, 0);
+        SetActionAvailability(optimizerButton, canRun, _localization["CompletePreviousSteps"]);
         optimizerStack.Children.Add(optimizerButton);
         if (_pendingNucleiRecommendation is JsonElement nucleiRecommendation)
         {
-            optimizerStack.Children.Add(new TextBlock
-            {
-                Text = _localization["SuggestedComboReady"],
-                Foreground = (Brush)FindResource("SecondaryTextBrush"),
-                TextWrapping = TextWrapping.Wrap,
-                Margin = new Thickness(0, 12, 0, 8),
-            });
+            var recommendationPanel = new StackPanel { Tag = "recommendation:nuclei" };
+            recommendationPanel.Children.Add(CreateSupportingText(_localization["SuggestedComboReady"], new Thickness(0, 12, 0, 8)));
             var applySuggestion = CreateButton(_localization["ApplySuggestedCombo"], async (_, _) =>
             {
+                if (_pendingNucleiRecommendation is not JsonElement currentRecommendation
+                    || !string.Equals(currentRecommendation.GetRawText(), nucleiRecommendation.GetRawText(), StringComparison.Ordinal))
+                {
+                    HideTaggedDetailElement("recommendation:nuclei");
+                    SetLocalizedStatus("SuggestedComboExpired", isError: true);
+                    return;
+                }
                 var appliedParameters = _nucleiValues.ToDictionary(
                     item => item.Key,
                     item => (object?)item.Value);
@@ -1290,19 +1631,20 @@ public partial class MainWindow : Window
                 ApplyNucleiRecommendation(nucleiRecommendation);
                 _pendingNucleiRecommendation = null;
                 SetLocalizedStatus("SuggestedComboApplied");
-                DetailHost.Content = BuildNucleiView();
+                RefreshSectionViewIfSelected("nuclei");
             }, primary: true);
             AutomationProperties.SetAutomationId(applySuggestion, "ApplyNucleiSuggestedCombo");
-            optimizerStack.Children.Add(applySuggestion);
+            recommendationPanel.Children.Add(applySuggestion);
+            optimizerStack.Children.Add(recommendationPanel);
         }
         if (_previewPaths.TryGetValue("nucleiOptimizer", out var optimizerPreview))
         {
-            var previewPanel = CreateImagePanel(_localization["AdvancedScreening"], optimizerPreview);
+            var previewPanel = CreateImagePanel(_localization["AdvancedScreening"], optimizerPreview, previewKey: "nucleiOptimizer");
             previewPanel.Margin = new Thickness(0, 16, 0, 0);
             optimizerStack.Children.Add(previewPanel);
         }
         var actions = new WrapPanel { Margin = new Thickness(0, 14, 0, 0) };
-        actions.Children.Add(CreateButton(_localization["RunNuclei"], async (_, _) =>
+        var runNuclei = CreateButton(_localization["RunNuclei"], async (_, _) =>
         {
             var result = await RunWorkflowAsync("nuclei", "nuclei", new
             {
@@ -1312,13 +1654,19 @@ public partial class MainWindow : Window
             if (result is null) return;
             _previewPaths["nuclei"] = result.Value.TryGetProperty("previewPath", out var preview) ? preview.GetString() ?? string.Empty : string.Empty;
             CaptureExportPaths(result.Value);
-            DetailHost.Content = BuildNucleiView();
-        }, primary: true));
+            RefreshSectionViewIfSelected("nuclei");
+        }, primary: true);
+        SetActionAvailability(runNuclei, canRun, _localization["CompletePreviousSteps"]);
+        actions.Children.Add(runNuclei);
         var parameterStack = new StackPanel();
         parameterStack.Children.Add(parameterGrid);
         var finalStack = new StackPanel();
         finalStack.Children.Add(actions);
-        var finalPreview = CreateImagePanel(_localization["FinalSegmentation"], _previewPaths.GetValueOrDefault("nuclei"));
+        var finalPreview = CreateImagePanel(
+            _localization["SegmentationPreview"],
+            _previewPaths.GetValueOrDefault("nuclei"),
+            emptyDetail: _localization["RunAnalysisForPreview"],
+            previewKey: "nuclei");
         finalPreview.Margin = new Thickness(0, 16, 0, 0);
         finalStack.Children.Add(finalPreview);
 
@@ -1342,7 +1690,7 @@ public partial class MainWindow : Window
             CreateCard(_localization["RunMode"], modeSelector),
             optimizerCard,
             CreateCard(_localization["FinalRunParameters"], parameterStack),
-            CreateCard(_localization["FinalSegmentation"], finalStack));
+            CreateCard(_localization["RunAndReview"], finalStack));
     }
 
     private UIElement CreateParameterEditor(ParameterDefinition parameter, Dictionary<string, double> values)
@@ -1359,7 +1707,7 @@ public partial class MainWindow : Window
         row.ColumnDefinitions.Add(new ColumnDefinition());
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(128) });
         var name = _localization.EffectiveLanguage == InterfaceLanguage.SimplifiedChinese ? parameter.ChineseName : parameter.EnglishName;
-        row.Children.Add(new TextBlock { Text = name, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center });
+        row.Children.Add(CreateFieldLabel(name));
         var editorRow = new DockPanel();
         if (!string.IsNullOrWhiteSpace(parameter.Unit))
         {
@@ -1368,6 +1716,8 @@ public partial class MainWindow : Window
             editorRow.Children.Add(unit);
         }
         var editor = new TextBox { Text = values[parameter.Key].ToString("0.###", CultureInfo.CurrentCulture), FontFamily = new FontFamily("Cascadia Mono, Consolas") };
+        AutomationProperties.SetName(editor, name);
+        AutomationProperties.SetHelpText(editor, $"{parameter.Minimum:0.###}–{parameter.Maximum:0.###} {parameter.Unit}".Trim());
         editor.LostFocus += (_, _) =>
         {
             if (TryReadDouble(editor.Text, out var parsed))
@@ -1395,15 +1745,9 @@ public partial class MainWindow : Window
         Grid.SetColumn(editorRow, 1);
         row.Children.Add(editorRow);
         stack.Children.Add(row);
-        stack.Children.Add(new TextBlock
-        {
-            Text = _localization.EffectiveLanguage == InterfaceLanguage.SimplifiedChinese ? parameter.ChineseExplanation : parameter.EnglishExplanation,
-            FontSize = 12.5,
-            Foreground = (Brush)FindResource("SecondaryTextBrush"),
-            TextWrapping = TextWrapping.Wrap,
-            Margin = new Thickness(0, 6, 0, 0),
-            LineHeight = 18,
-        });
+        stack.Children.Add(CreateSupportingText(
+            _localization.EffectiveLanguage == InterfaceLanguage.SimplifiedChinese ? parameter.ChineseExplanation : parameter.EnglishExplanation,
+            new Thickness(0, 6, 0, 0)));
         panel.Child = stack;
         return panel;
     }
@@ -1449,9 +1793,23 @@ public partial class MainWindow : Window
     {
         RefreshCellTypeMarkerOptions();
         EnsureDefaultCellTypes();
-        var tabs = new TabControl { Margin = new Thickness(24, 22, 24, 24) };
-        tabs.Items.Add(new TabItem { Header = _localization["CellTypeDefinitions"], Content = BuildCellTypeRulesPanel() });
-        tabs.Items.Add(new TabItem { Header = _localization["AssignmentParameters"], Content = BuildAssignmentPanel() });
+        var tabs = new TabControl
+        {
+            Margin = new Thickness(24, 22, 24, 24),
+            Style = (Style)FindResource("WorkflowTabControlStyle"),
+        };
+        tabs.Items.Add(new TabItem
+        {
+            Header = _localization["MarkerRules"],
+            Content = BuildCellTypeRulesPanel(),
+            Style = (Style)FindResource("WorkflowTabItemStyle"),
+        });
+        tabs.Items.Add(new TabItem
+        {
+            Header = _localization["ScreeningAndAssignment"],
+            Content = BuildAssignmentPanel(),
+            Style = (Style)FindResource("WorkflowTabItemStyle"),
+        });
         tabs.SelectedIndex = Math.Clamp(_cellTypesTabIndex, 0, tabs.Items.Count - 1);
         tabs.SelectionChanged += (_, _) =>
         {
@@ -1463,25 +1821,44 @@ public partial class MainWindow : Window
     private UIElement BuildCellTypeRulesPanel()
     {
         var stack = new StackPanel { Margin = new Thickness(0, 18, 0, 0) };
+        var grid = new DataGrid
+        {
+            ItemsSource = _cellTypes,
+            MinHeight = 420,
+            RowHeight = 48,
+            SelectionMode = DataGridSelectionMode.Single,
+        };
         var actions = new WrapPanel { Margin = new Thickness(0, 0, 0, 12) };
         actions.Children.Add(CreateButton(_localization["AddCellType"], (_, _) =>
         {
-            _cellTypes.Add(new CellTypeRow
+            var added = new CellTypeRow
             {
                 Name = $"Cell type {_cellTypes.Count + 1}",
                 ColorHex = ChannelPalette[(_cellTypes.Count + 2) % ChannelPalette.Length],
                 AllPositive = NucleusMarker,
-            });
+            };
+            _cellTypes.Add(added);
+            grid.SelectedItem = added;
             InvalidateCellTypeInputs();
         }));
-        actions.Children.Add(CreateButton(_localization["Remove"], (_, _) =>
+        var remove = CreateButton(_localization["Remove"], (_, _) =>
         {
-            if (_cellTypes.Count <= 0) return;
-            _cellTypes.RemoveAt(_cellTypes.Count - 1);
+            if (grid.SelectedItem is not CellTypeRow selected) return;
+            _cellTypes.Remove(selected);
             InvalidateCellTypeInputs();
-        }));
+        });
+        remove.IsEnabled = false;
+        remove.ToolTip = _localization["SelectRowToRemove"];
+        AutomationProperties.SetHelpText(remove, _localization["SelectRowToRemove"]);
+        actions.Children.Add(remove);
         stack.Children.Add(actions);
-        var grid = new DataGrid { ItemsSource = _cellTypes, MinHeight = 420, RowHeight = 48 };
+        grid.SelectionChanged += (_, _) =>
+        {
+            var canRemove = grid.SelectedItem is CellTypeRow && !_isBusy;
+            remove.IsEnabled = canRemove;
+            remove.ToolTip = canRemove ? null : _localization["SelectRowToRemove"];
+            AutomationProperties.SetHelpText(remove, canRemove ? string.Empty : _localization["SelectRowToRemove"]);
+        };
         grid.CellEditEnding += (_, eventArgs) =>
         {
             if (eventArgs.EditAction == DataGridEditAction.Commit) InvalidateCellTypeInputs();
@@ -1512,17 +1889,16 @@ public partial class MainWindow : Window
             Width = new DataGridLength(1, DataGridLengthUnitType.Star),
         });
         stack.Children.Add(grid);
-        stack.Children.Add(new TextBlock
-        {
-            Text = _localization.EffectiveLanguage == InterfaceLanguage.SimplifiedChinese
-                ? "单击每个标记框可查看所有可用标记，并可选择多个。“全部阳性”需要每个所选标记均为阳性；“任一阳性”只需至少一个所选标记为阳性。"
+        stack.Children.Add(CreateSupportingText(
+            _localization.EffectiveLanguage == InterfaceLanguage.SimplifiedChinese
+                ? "单击每个标记框可查看所有可用标记，并可选择多个。“全部阳性”要求每个所选标记均为阳性；“任一阳性”只需至少一个所选标记为阳性。"
                 : "Click a marker box to see every available marker and select more than one. All-positive requires every selected marker; Any-positive requires at least one selected marker.",
-            FontSize = 12.5,
-            Foreground = (Brush)FindResource("SecondaryTextBrush"),
-            TextWrapping = TextWrapping.Wrap,
-            Margin = new Thickness(0, 10, 0, 0),
-        });
-        return new ScrollViewer { Content = CreateCard(_localization["CellTypeDefinitions"], stack), VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+            new Thickness(0, 10, 0, 0)));
+        return new ScrollViewer
+        {
+            Content = CreateCard(_localization["MarkerRules"], stack),
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+        };
     }
 
     private void CellTypeMarkerSelectionChanged(object sender, RoutedEventArgs e)
@@ -1533,16 +1909,20 @@ public partial class MainWindow : Window
 
     private UIElement BuildAssignmentPanel()
     {
+        var canRun = _sections.First(section => section.Key == "cellTypes").Status != WorkflowStatus.NotStarted;
         var parameters = new UniformGrid { Columns = 2 };
         foreach (var parameter in ParameterCatalog.Assignment) parameters.Children.Add(CreateParameterEditor(parameter, _assignmentValues));
 
-        var thresholdPanel = new StackPanel { Margin = new Thickness(0, 14, 0, 0) };
-        thresholdPanel.Children.Add(new TextBlock { Text = _localization.EffectiveLanguage == InterfaceLanguage.SimplifiedChinese ? "阈值模式" : "Threshold mode", FontWeight = FontWeights.SemiBold });
+        var thresholdPanel = new StackPanel { Margin = new Thickness(0, 16, 0, 0) };
+        var thresholdLabel = _localization.EffectiveLanguage == InterfaceLanguage.SimplifiedChinese ? "阈值模式" : "Threshold mode";
+        thresholdPanel.Children.Add(CreateSubsectionTitle(thresholdLabel));
         var threshold = new ComboBox { Width = 280, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, 6, 0, 0) };
+        AutomationProperties.SetName(threshold, thresholdLabel);
         threshold.Items.Add(new ComboBoxItem { Content = "Global Otsu", Tag = "global_otsu" });
+        threshold.Items.Add(new ComboBoxItem { Content = "Local", Tag = "local" });
         threshold.Items.Add(new ComboBoxItem { Content = "Yen", Tag = "yen" });
         threshold.Items.Add(new ComboBoxItem { Content = "Triangle", Tag = "triangle" });
-        threshold.SelectedIndex = _thresholdMode switch { "yen" => 1, "triangle" => 2, _ => 0 };
+        threshold.SelectedIndex = _thresholdMode switch { "local" => 1, "yen" => 2, "triangle" => 3, _ => 0 };
         threshold.SelectionChanged += (_, _) =>
         {
             var selectedMode = ((ComboBoxItem)threshold.SelectedItem).Tag?.ToString() ?? "global_otsu";
@@ -1551,19 +1931,18 @@ public partial class MainWindow : Window
             InvalidateCellTypeInputs();
         };
         thresholdPanel.Children.Add(threshold);
-        thresholdPanel.Children.Add(new TextBlock
-        {
-            Text = _localization.EffectiveLanguage == InterfaceLanguage.SimplifiedChinese
-                ? "Global Otsu 是通用默认值；Yen 对稀疏亮信号通常更严格；Triangle 适合强烈偏斜的直方图。"
-                : "Global Otsu is the general default, Yen is often stricter for sparse bright signal, and Triangle suits strongly skewed histograms.",
-            FontSize = 12.5, Foreground = (Brush)FindResource("SecondaryTextBrush"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 6, 0, 0),
-        });
+        thresholdPanel.Children.Add(CreateSupportingText(
+            _localization.EffectiveLanguage == InterfaceLanguage.SimplifiedChinese
+                ? "Global Otsu 是通用默认值；Local 与 macOS 兼容并使用相同的 Otsu 判定；Yen 对稀疏亮信号通常更严格；Triangle 保留用于兼容旧版 Windows 结果。"
+                : "Global Otsu is the general default. Local matches the macOS-compatible Otsu behavior, Yen is often stricter for sparse bright signal, and Triangle remains available for older Windows results.",
+            new Thickness(0, 6, 0, 0)));
+        var ambiguousPanel = new StackPanel();
         var resolve = new CheckBox
         {
             IsChecked = _resolveAmbiguous,
             Content = _localization.EffectiveLanguage == InterfaceLanguage.SimplifiedChinese ? "使用概率证据解析模糊细胞" : "Resolve ambiguous cells using probability evidence",
             FontWeight = FontWeights.SemiBold,
-            Margin = new Thickness(0, 16, 0, 0),
+            Margin = new Thickness(0),
         };
         resolve.Checked += (_, _) =>
         {
@@ -1577,23 +1956,15 @@ public partial class MainWindow : Window
             _resolveAmbiguous = false;
             InvalidateCellTypeInputs();
         };
-        thresholdPanel.Children.Add(resolve);
-        thresholdPanel.Children.Add(new TextBlock
-        {
-            Text = _localization.EffectiveLanguage == InterfaceLanguage.SimplifiedChinese
+        ambiguousPanel.Children.Add(resolve);
+        ambiguousPanel.Children.Add(CreateSupportingText(
+            _localization.EffectiveLanguage == InterfaceLanguage.SimplifiedChinese
                 ? "启用后，符合条件的多重匹配细胞可按概率重新分配；禁用后，所有多重匹配细胞都保留为 Ambiguous。"
                 : "When enabled, eligible multi-match cells may be reassigned by probability; when disabled, every multi-match cell remains Ambiguous.",
-            FontSize = 12.5, Foreground = (Brush)FindResource("SecondaryTextBrush"), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 6, 0, 0),
-        });
+            new Thickness(0, 6, 0, 0)));
 
         var optimizerStack = new StackPanel();
-        optimizerStack.Children.Add(new TextBlock
-        {
-            Text = _localization["AssignmentOptimizerHelp"],
-            TextWrapping = TextWrapping.Wrap,
-            Foreground = (Brush)FindResource("SecondaryTextBrush"),
-            Margin = new Thickness(0, 0, 0, 10),
-        });
+        optimizerStack.Children.Add(CreateSupportingText(_localization["AssignmentOptimizerHelp"], new Thickness(0, 0, 0, 10)));
         optimizerStack.Children.Add(CreateNumberField(
             _localization["OptimizerBudget"],
             _assignmentOptimizerBudget,
@@ -1615,21 +1986,25 @@ public partial class MainWindow : Window
             _pendingAssignmentRecommendation = ExtractRecommendation(result.Value);
             _previewPaths["assignmentOptimizer"] = result.Value.TryGetProperty("previewPath", out var preview) && preview.ValueKind == JsonValueKind.String ? preview.GetString() ?? string.Empty : string.Empty;
             CaptureExportPaths(result.Value);
-            DetailHost.Content = BuildCellTypesView();
+            RefreshSectionViewIfSelected("cellTypes");
         });
+        optimize.Style = (Style)FindResource("PrimaryButtonStyle");
         optimize.Margin = new Thickness(0, 10, 0, 0);
+        SetActionAvailability(optimize, canRun && _cellTypes.Count > 0, _localization["CompletePreviousSteps"]);
         optimizerStack.Children.Add(optimize);
         if (_pendingAssignmentRecommendation is JsonElement assignmentRecommendation)
         {
-            optimizerStack.Children.Add(new TextBlock
-            {
-                Text = _localization["SuggestedComboReady"],
-                Foreground = (Brush)FindResource("SecondaryTextBrush"),
-                TextWrapping = TextWrapping.Wrap,
-                Margin = new Thickness(0, 12, 0, 8),
-            });
+            var recommendationPanel = new StackPanel { Tag = "recommendation:assignment" };
+            recommendationPanel.Children.Add(CreateSupportingText(_localization["SuggestedComboReady"], new Thickness(0, 12, 0, 8)));
             var applySuggestion = CreateButton(_localization["ApplySuggestedCombo"], async (_, _) =>
             {
+                if (_pendingAssignmentRecommendation is not JsonElement currentRecommendation
+                    || !string.Equals(currentRecommendation.GetRawText(), assignmentRecommendation.GetRawText(), StringComparison.Ordinal))
+                {
+                    HideTaggedDetailElement("recommendation:assignment");
+                    SetLocalizedStatus("SuggestedComboExpired", isError: true);
+                    return;
+                }
                 var appliedParameters = _assignmentValues.ToDictionary(
                     item => item.Key,
                     item => (object?)item.Value);
@@ -1648,14 +2023,15 @@ public partial class MainWindow : Window
                 ApplyAssignmentRecommendation(assignmentRecommendation);
                 _pendingAssignmentRecommendation = null;
                 SetLocalizedStatus("SuggestedComboApplied");
-                DetailHost.Content = BuildCellTypesView();
+                RefreshSectionViewIfSelected("cellTypes");
             }, primary: true);
             AutomationProperties.SetAutomationId(applySuggestion, "ApplyAssignmentSuggestedCombo");
-            optimizerStack.Children.Add(applySuggestion);
+            recommendationPanel.Children.Add(applySuggestion);
+            optimizerStack.Children.Add(recommendationPanel);
         }
         if (_previewPaths.TryGetValue("assignmentOptimizer", out var assignmentOptimizerPreview))
         {
-            var previewPanel = CreateImagePanel(_localization["AdvancedScreening"], assignmentOptimizerPreview);
+            var previewPanel = CreateImagePanel(_localization["AdvancedScreening"], assignmentOptimizerPreview, previewKey: "assignmentOptimizer");
             previewPanel.Margin = new Thickness(0, 14, 0, 0);
             optimizerStack.Children.Add(previewPanel);
         }
@@ -1678,18 +2054,21 @@ public partial class MainWindow : Window
                     if (property.Name is not "Unassigned" and not "Ambiguous") _resolvedCellTypes.Add(property.Name);
             }
             CaptureExportPaths(result.Value);
-            DetailHost.Content = BuildCellTypesView();
+            RefreshSectionViewIfSelected("cellTypes");
         }, primary: true);
         run.Margin = new Thickness(0, 18, 0, 0);
+        SetActionAvailability(run, canRun && _cellTypes.Count > 0, _localization["CompletePreviousSteps"]);
+
+        var settingsStack = new StackPanel();
+        settingsStack.Children.Add(parameters);
+        settingsStack.Children.Add(thresholdPanel);
 
         var finalRunStack = new StackPanel();
-        finalRunStack.Children.Add(parameters);
-        finalRunStack.Children.Add(thresholdPanel);
-        finalRunStack.Children.Add(new TextBlock { Text = _localization["ResultsStayEnglish"], FontSize = 12.5, Foreground = (Brush)FindResource("SecondaryTextBrush"), Margin = new Thickness(0, 14, 0, 0) });
+        finalRunStack.Children.Add(CreateSupportingText(_localization["ResultsStayEnglish"]));
         finalRunStack.Children.Add(run);
         if (_previewPaths.TryGetValue("cellTypes", out var previewPath) && !string.IsNullOrWhiteSpace(previewPath))
         {
-            var preview = CreateImagePanel(_localization["CellTypesTitle"], previewPath);
+            var preview = CreateImagePanel(_localization["CellTypesTitle"], previewPath, previewKey: "cellTypes");
             preview.Margin = new Thickness(0, 18, 0, 0);
             finalRunStack.Children.Add(preview);
         }
@@ -1710,9 +2089,12 @@ public partial class MainWindow : Window
             });
 
         var content = new StackPanel { Margin = new Thickness(0, 18, 0, 0) };
+        if (!canRun) content.Children.Add(CreateInlineNotice(_localization["CompletePreviousSteps"], warning: true));
         content.Children.Add(CreateCard(_localization["AssignmentMode"], modeSelector));
         content.Children.Add(optimizerCard);
-        content.Children.Add(CreateCard(_localization["FinalRunParameters"], finalRunStack));
+        content.Children.Add(CreateCard(_localization["AssignmentSettings"], settingsStack));
+        content.Children.Add(CreateCard(_localization["AmbiguousResolution"], ambiguousPanel));
+        content.Children.Add(CreateCard(_localization["RunAndReview"], finalRunStack));
         return new ScrollViewer
         {
             Content = content,
@@ -1771,7 +2153,7 @@ public partial class MainWindow : Window
             return false;
         }
 
-        _isBusy = true;
+        SetInteractionBusy(true);
         UpdateHeader();
         try
         {
@@ -1785,7 +2167,7 @@ public partial class MainWindow : Window
         }
         finally
         {
-            _isBusy = false;
+            SetInteractionBusy(false);
             UpdateHeader();
         }
     }
@@ -1798,106 +2180,318 @@ public partial class MainWindow : Window
 
     private UIElement BuildNeighborhoodView()
     {
-        var gridSize = 20.0;
-        var field = CreateNumberField(_localization["GridSize"], gridSize, value => gridSize = value, "µm", "neighborhood");
+        var field = CreateNumberField(
+            _localization["GridSize"],
+            _neighborhoodGridSize,
+            value => _neighborhoodGridSize = value,
+            "µm",
+            "neighborhood");
         var stack = new StackPanel();
+        var hasCellTypes = _resolvedCellTypes.Count > 0;
+        var workflowReady = _sections.First(section => section.Key == "neighborhood").Status != WorkflowStatus.NotStarted;
+        if (!workflowReady) stack.Children.Add(CreateInlineNotice(_localization["CompletePreviousSteps"], warning: true));
+        else if (!hasCellTypes) stack.Children.Add(CreateInlineNotice(_localization["PrerequisiteCellTypes"], warning: true));
         stack.Children.Add(field);
         var run = CreateButton(_localization["RunNeighborhood"], async (_, _) =>
         {
-            var result = await RunWorkflowAsync("neighborhood", "neighborhood", new { gridSizeUm = gridSize });
+            var result = await RunWorkflowAsync("neighborhood", "neighborhood", new { gridSizeUm = _neighborhoodGridSize });
             if (result is null) return;
             _previewPaths["neighborhood"] = result.Value.TryGetProperty("previewPath", out var preview) && preview.ValueKind == JsonValueKind.String ? preview.GetString() ?? string.Empty : string.Empty;
             CaptureExportPaths(result.Value);
-            DetailHost.Content = BuildNeighborhoodView();
+            RefreshSectionViewIfSelected("neighborhood");
         }, primary: true);
         run.Margin = new Thickness(0, 14, 0, 0);
+        SetActionAvailability(
+            run,
+            workflowReady && hasCellTypes,
+            !workflowReady ? _localization["CompletePreviousSteps"] : _localization["PrerequisiteCellTypes"]);
         stack.Children.Add(run);
-        return CreatePage(CreateCard(_localization["NeighborhoodTitle"], stack), CreateCard(_localization["NeighborhoodTitle"], CreateImagePanel(_localization["NeighborhoodTitle"], _previewPaths.GetValueOrDefault("neighborhood"))));
+        return CreatePage(
+            CreateCard(_localization["AnalysisSettings"], stack),
+            CreateCard(_localization["Preview"], CreateImagePanel(
+                _localization["NeighborhoodTitle"],
+                _previewPaths.GetValueOrDefault("neighborhood"),
+                emptyDetail: hasCellTypes ? _localization["RunAnalysisForPreview"] : _localization["PrerequisiteCellTypes"],
+                previewKey: "neighborhood")));
     }
 
     private UIElement BuildRegionView()
     {
-        var selected = new ObservableCollection<string>(_resolvedCellTypes.Take(1));
-        var typePicker = new ListBox { ItemsSource = _resolvedCellTypes, SelectionMode = SelectionMode.Multiple, MinHeight = 90 };
-        foreach (var item in selected) typePicker.SelectedItems.Add(item);
-        var close = 15.0;
-        var dilate = 10.0;
-        var minArea = 20000.0;
-        var minCells = 5.0;
+        if (_resolvedCellTypes.Count > 0)
+            _regionSelectedCellTypes.RemoveAll(item => !_resolvedCellTypes.Contains(item, StringComparer.Ordinal));
+        if (!_regionSelectionInitialized && _resolvedCellTypes.Count > 0)
+        {
+            if (_regionSelectedCellTypes.Count == 0) _regionSelectedCellTypes.Add(_resolvedCellTypes[0]);
+            _regionSelectionInitialized = true;
+        }
+        var typePicker = new ListBox
+        {
+            ItemsSource = _resolvedCellTypes,
+            SelectionMode = SelectionMode.Multiple,
+            MinHeight = 110,
+        };
+        AutomationProperties.SetName(typePicker, _localization["SelectedCellTypes"]);
+        AutomationProperties.SetHelpText(typePicker, _localization["SelectCellTypeHelp"]);
+        foreach (var item in _regionSelectedCellTypes) typePicker.SelectedItems.Add(item);
         var parameters = new UniformGrid { Columns = 2 };
-        parameters.Children.Add(CreateNumberField(_localization["ClosingRadius"], close, value => close = value, "µm", "region"));
-        parameters.Children.Add(CreateNumberField(_localization["DilationRadius"], dilate, value => dilate = value, "µm", "region"));
-        parameters.Children.Add(CreateNumberField(_localization["MinimumArea"], minArea, value => minArea = value, "µm²", "region"));
-        parameters.Children.Add(CreateNumberField(_localization["MinimumCells"], minCells, value => minCells = value, "", "region"));
+        parameters.Children.Add(CreateNumberField(_localization["ClosingRadius"], _regionClosingRadius, value => _regionClosingRadius = value, "µm", "region", minimum: 0));
+        parameters.Children.Add(CreateNumberField(_localization["DilationRadius"], _regionDilationRadius, value => _regionDilationRadius = value, "µm", "region", minimum: 0));
+        parameters.Children.Add(CreateNumberField(_localization["MinimumArea"], _regionMinimumArea, value => _regionMinimumArea = value, "µm²", "region", minimum: 0));
+        parameters.Children.Add(CreateNumberField(
+            _localization["MinimumCells"],
+            _regionMinimumCells,
+            value => _regionMinimumCells = value,
+            "",
+            "region",
+            normalize: value => Math.Max(1, Math.Round(value)),
+            minimum: 1));
         var stack = new StackPanel();
-        stack.Children.Add(new TextBlock { Text = _localization["SelectedCellTypes"], FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 6) });
+        var hasCellTypes = _resolvedCellTypes.Count > 0;
+        var workflowReady = _sections.First(section => section.Key == "region").Status != WorkflowStatus.NotStarted;
+        if (!workflowReady) stack.Children.Add(CreateInlineNotice(_localization["CompletePreviousSteps"], warning: true));
+        else if (!hasCellTypes) stack.Children.Add(CreateInlineNotice(_localization["PrerequisiteCellTypes"], warning: true));
+        stack.Children.Add(CreateFieldLabel(_localization["SelectedCellTypes"], new Thickness(0, 0, 0, 6)));
         stack.Children.Add(typePicker);
+        parameters.Margin = new Thickness(0, 16, 0, 0);
         stack.Children.Add(parameters);
         var run = CreateButton(_localization["RunRegion"], async (_, _) =>
         {
-            var selectedTypes = typePicker.SelectedItems.Cast<string>().ToArray();
-            var result = await RunWorkflowAsync("region", "region", new { selectedTypes, closeUm = close, dilateUm = dilate, minAreaUm2 = minArea, minCells = (int)Math.Round(minCells) });
+            var result = await RunWorkflowAsync("region", "region", new
+            {
+                selectedTypes = _regionSelectedCellTypes.ToArray(),
+                closeUm = _regionClosingRadius,
+                dilateUm = _regionDilationRadius,
+                minAreaUm2 = _regionMinimumArea,
+                minCells = (int)Math.Round(_regionMinimumCells),
+            });
             if (result is null) return;
             _boundaries.Clear();
             foreach (var item in result.Value.GetProperty("boundaries").EnumerateArray())
                 _boundaries.Add((item.GetProperty("label").GetString() ?? string.Empty, item.GetProperty("path").GetString() ?? string.Empty));
             _previewPaths["region"] = result.Value.TryGetProperty("previewPath", out var preview) && preview.ValueKind == JsonValueKind.String ? preview.GetString() ?? string.Empty : string.Empty;
             CaptureExportPaths(result.Value);
-            DetailHost.Content = BuildRegionView();
+            RefreshSectionViewIfSelected("region");
         }, primary: true);
         run.Margin = new Thickness(0, 14, 0, 0);
+        void RefreshRunAvailability() => SetActionAvailability(
+            run,
+            workflowReady && hasCellTypes && _regionSelectedCellTypes.Count > 0,
+            !workflowReady
+                ? _localization["CompletePreviousSteps"]
+                : !hasCellTypes ? _localization["PrerequisiteCellTypes"] : _localization["SelectCellTypeHelp"]);
+        RefreshRunAvailability();
+        typePicker.SelectionChanged += (_, _) =>
+        {
+            var selected = typePicker.SelectedItems.Cast<string>().ToArray();
+            if (_regionSelectedCellTypes.SequenceEqual(selected, StringComparer.Ordinal)) return;
+            _regionSelectionInitialized = true;
+            _regionSelectedCellTypes.Clear();
+            _regionSelectedCellTypes.AddRange(selected);
+            InvalidateAfter("region");
+            RefreshRunAvailability();
+        };
         stack.Children.Add(run);
-        return CreatePage(CreateCard(_localization["RegionTitle"], stack), CreateCard(_localization["RegionTitle"], CreateImagePanel(_localization["RegionTitle"], _previewPaths.GetValueOrDefault("region"))));
+        return CreatePage(
+            CreateCard(_localization["AnalysisSettings"], stack),
+            CreateCard(_localization["Preview"], CreateImagePanel(
+                _localization["RegionTitle"],
+                _previewPaths.GetValueOrDefault("region"),
+                emptyDetail: hasCellTypes ? _localization["RunAnalysisForPreview"] : _localization["PrerequisiteCellTypes"],
+                previewKey: "region")));
     }
 
     private UIElement BuildDistributionView()
     {
-        var boundary = new ComboBox { ItemsSource = _boundaries.Select(item => item.Label).ToArray(), SelectedIndex = _boundaries.Count > 0 ? 0 : -1, Width = 360, HorizontalAlignment = HorizontalAlignment.Left };
-        var bandWidth = 10.0;
+        var boundaryOptions = _boundaries.Select(item => item.Label).ToArray();
+        if (boundaryOptions.Length > 0
+            && (_distributionBoundaryLabel is null || !boundaryOptions.Contains(_distributionBoundaryLabel, StringComparer.Ordinal)))
+            _distributionBoundaryLabel = boundaryOptions.FirstOrDefault();
+        if (_resolvedCellTypes.Count > 0)
+            _distributionSelectedCellTypes.RemoveAll(item => !_resolvedCellTypes.Contains(item, StringComparer.Ordinal));
+        if (!_distributionSelectionInitialized && _resolvedCellTypes.Count > 0)
+        {
+            if (_distributionSelectedCellTypes.Count == 0) _distributionSelectedCellTypes.AddRange(_resolvedCellTypes);
+            _distributionSelectionInitialized = true;
+        }
+        var boundary = new ComboBox
+        {
+            ItemsSource = boundaryOptions,
+            SelectedItem = _distributionBoundaryLabel,
+            Width = 360,
+            HorizontalAlignment = HorizontalAlignment.Left,
+        };
+        AutomationProperties.SetName(boundary, _localization["Boundary"]);
+        var typePicker = new ListBox
+        {
+            ItemsSource = _resolvedCellTypes,
+            SelectionMode = SelectionMode.Multiple,
+            MinHeight = 110,
+        };
+        AutomationProperties.SetName(typePicker, _localization["DistributionCellTypes"]);
+        AutomationProperties.SetHelpText(typePicker, _localization["SelectCellTypeHelp"]);
+        foreach (var item in _distributionSelectedCellTypes) typePicker.SelectedItems.Add(item);
         var stack = new StackPanel();
-        stack.Children.Add(new TextBlock { Text = _localization["Boundary"], FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 6) });
+        var hasBoundaries = boundaryOptions.Length > 0;
+        var hasCellTypes = _resolvedCellTypes.Count > 0;
+        var workflowReady = _sections.First(section => section.Key == "distribution").Status != WorkflowStatus.NotStarted;
+        if (!workflowReady) stack.Children.Add(CreateInlineNotice(_localization["CompletePreviousSteps"], warning: true));
+        else
+        {
+            if (!hasBoundaries) stack.Children.Add(CreateInlineNotice(_localization["PrerequisiteRegion"], warning: true));
+            if (!hasCellTypes) stack.Children.Add(CreateInlineNotice(_localization["PrerequisiteCellTypes"], warning: true));
+        }
+        stack.Children.Add(CreateFieldLabel(_localization["Boundary"], new Thickness(0, 0, 0, 6)));
         stack.Children.Add(boundary);
-        stack.Children.Add(CreateNumberField(_localization["BandWidth"], bandWidth, value => bandWidth = value, "µm", "distribution"));
+        stack.Children.Add(CreateFieldLabel(_localization["DistributionCellTypes"], new Thickness(0, 16, 0, 6)));
+        stack.Children.Add(typePicker);
+        var bandWidthField = CreateNumberField(
+            _localization["BandWidth"],
+            _distributionBandWidth,
+            value => _distributionBandWidth = value,
+            "µm",
+            "distribution");
+        if (bandWidthField is FrameworkElement bandWidthElement) bandWidthElement.Margin = new Thickness(0, 16, 14, 0);
+        stack.Children.Add(bandWidthField);
         var run = CreateButton(_localization["RunDistribution"], async (_, _) =>
         {
             var result = await RunWorkflowAsync("distribution", "cell_distribution", new
             {
-                boundaryLabel = boundary.SelectedItem?.ToString(),
-                bandWidthUm = bandWidth,
-                selectedCellTypes = _resolvedCellTypes.ToArray(),
+                boundaryLabel = _distributionBoundaryLabel,
+                bandWidthUm = _distributionBandWidth,
+                selectedCellTypes = _distributionSelectedCellTypes.ToArray(),
             });
             if (result is null) return;
             _previewPaths["distribution"] = result.Value.TryGetProperty("previewPath", out var preview) && preview.ValueKind == JsonValueKind.String ? preview.GetString() ?? string.Empty : string.Empty;
             CaptureExportPaths(result.Value);
-            DetailHost.Content = BuildDistributionView();
+            RefreshSectionViewIfSelected("distribution");
         }, primary: true);
         run.Margin = new Thickness(0, 14, 0, 0);
+        void RefreshRunAvailability() => SetActionAvailability(
+            run,
+            workflowReady && hasBoundaries && hasCellTypes && _distributionSelectedCellTypes.Count > 0 && !string.IsNullOrWhiteSpace(_distributionBoundaryLabel),
+            !workflowReady
+                ? _localization["CompletePreviousSteps"]
+                : !hasBoundaries ? _localization["PrerequisiteRegion"] : _localization["SelectCellTypeHelp"]);
+        RefreshRunAvailability();
+        boundary.SelectionChanged += (_, _) =>
+        {
+            var selected = boundary.SelectedItem?.ToString();
+            if (string.Equals(selected, _distributionBoundaryLabel, StringComparison.Ordinal)) return;
+            _distributionBoundaryLabel = selected;
+            InvalidateAfter("distribution");
+            RefreshRunAvailability();
+        };
+        typePicker.SelectionChanged += (_, _) =>
+        {
+            var selected = typePicker.SelectedItems.Cast<string>().ToArray();
+            if (_distributionSelectedCellTypes.SequenceEqual(selected, StringComparer.Ordinal)) return;
+            _distributionSelectionInitialized = true;
+            _distributionSelectedCellTypes.Clear();
+            _distributionSelectedCellTypes.AddRange(selected);
+            InvalidateAfter("distribution");
+            RefreshRunAvailability();
+        };
         stack.Children.Add(run);
-        return CreatePage(CreateCard(_localization["DistributionTitle"], stack), CreateCard(_localization["DistributionTitle"], CreateImagePanel(_localization["DistributionTitle"], _previewPaths.GetValueOrDefault("distribution"))));
+        return CreatePage(
+            CreateCard(_localization["AnalysisSettings"], stack),
+            CreateCard(_localization["Preview"], CreateImagePanel(
+                _localization["DistributionTitle"],
+                _previewPaths.GetValueOrDefault("distribution"),
+                emptyDetail: hasBoundaries ? _localization["RunAnalysisForPreview"] : _localization["PrerequisiteRegion"],
+                previewKey: "distribution")));
     }
 
     private UIElement BuildDistanceView()
     {
-        var tabs = new TabControl { Margin = new Thickness(24, 22, 24, 24) };
-        tabs.Items.Add(new TabItem { Header = _localization.EffectiveLanguage == InterfaceLanguage.SimplifiedChinese ? "最近邻距离" : "Nearest-neighbor distances", Content = BuildDistancePanel("nearest") });
-        tabs.Items.Add(new TabItem { Header = _localization.EffectiveLanguage == InterfaceLanguage.SimplifiedChinese ? "细胞到边界距离" : "Cell-to-boundary distances", Content = BuildDistancePanel("boundary") });
+        var tabs = new TabControl
+        {
+            Margin = new Thickness(24, 22, 24, 24),
+            Style = (Style)FindResource("WorkflowTabControlStyle"),
+        };
+        tabs.Items.Add(new TabItem
+        {
+            Header = _localization.EffectiveLanguage == InterfaceLanguage.SimplifiedChinese ? "最近邻距离" : "Nearest-neighbor distances",
+            Content = BuildDistancePanel("nearest"),
+            Style = (Style)FindResource("WorkflowTabItemStyle"),
+        });
+        tabs.Items.Add(new TabItem
+        {
+            Header = _localization.EffectiveLanguage == InterfaceLanguage.SimplifiedChinese ? "细胞到边界距离" : "Cell-to-boundary distances",
+            Content = BuildDistancePanel("boundary"),
+            Style = (Style)FindResource("WorkflowTabItemStyle"),
+        });
+        tabs.SelectedIndex = Math.Clamp(_distanceTabIndex, 0, tabs.Items.Count - 1);
+        tabs.SelectionChanged += (_, _) =>
+        {
+            if (tabs.SelectedIndex >= 0) _distanceTabIndex = tabs.SelectedIndex;
+        };
         return tabs;
     }
 
     private UIElement BuildDistancePanel(string mode)
     {
-        var target = new ComboBox { ItemsSource = _resolvedCellTypes, SelectedIndex = _resolvedCellTypes.Count > 0 ? 0 : -1, Width = 320, HorizontalAlignment = HorizontalAlignment.Left };
+        var storedTarget = mode == "boundary" ? _boundaryDistanceTarget : _nearestDistanceTarget;
+        if (_resolvedCellTypes.Count > 0
+            && (storedTarget is null || !_resolvedCellTypes.Contains(storedTarget, StringComparer.Ordinal)))
+            storedTarget = _resolvedCellTypes.FirstOrDefault();
+        if (mode == "boundary") _boundaryDistanceTarget = storedTarget;
+        else _nearestDistanceTarget = storedTarget;
+        var storedQueries = mode == "boundary" ? _boundaryDistanceQueries : _nearestDistanceQueries;
+        if (_resolvedCellTypes.Count > 0)
+            storedQueries.RemoveAll(item => !_resolvedCellTypes.Contains(item, StringComparer.Ordinal));
+        var queriesInitialized = mode == "boundary" ? _boundaryDistanceQueriesInitialized : _nearestDistanceQueriesInitialized;
+        if (!queriesInitialized && _resolvedCellTypes.Count > 0)
+        {
+            if (storedQueries.Count == 0)
+            {
+                var defaultQuery = _resolvedCellTypes.FirstOrDefault(item => !string.Equals(item, storedTarget, StringComparison.Ordinal))
+                    ?? _resolvedCellTypes.FirstOrDefault();
+                if (defaultQuery is not null) storedQueries.Add(defaultQuery);
+            }
+            if (mode == "boundary") _boundaryDistanceQueriesInitialized = true;
+            else _nearestDistanceQueriesInitialized = true;
+        }
+        var boundaryOptions = _boundaries.Select(item => item.Label).ToArray();
+        if (boundaryOptions.Length > 0
+            && (_distanceBoundaryLabel is null || !boundaryOptions.Contains(_distanceBoundaryLabel, StringComparer.Ordinal)))
+            _distanceBoundaryLabel = boundaryOptions.FirstOrDefault();
+        var target = new ComboBox
+        {
+            ItemsSource = _resolvedCellTypes,
+            SelectedItem = storedTarget,
+            Width = 320,
+            HorizontalAlignment = HorizontalAlignment.Left,
+        };
+        AutomationProperties.SetName(target, _localization["TargetCellType"]);
         var queries = new ListBox { ItemsSource = _resolvedCellTypes, SelectionMode = SelectionMode.Multiple, MinHeight = 110 };
-        if (_resolvedCellTypes.Count > 1) queries.SelectedItems.Add(_resolvedCellTypes[1]);
-        var boundary = new ComboBox { ItemsSource = _boundaries.Select(item => item.Label).ToArray(), SelectedIndex = _boundaries.Count > 0 ? 0 : -1, Width = 320, HorizontalAlignment = HorizontalAlignment.Left };
+        AutomationProperties.SetName(queries, _localization["QueryCellTypes"]);
+        AutomationProperties.SetHelpText(queries, _localization["SelectCellTypeHelp"]);
+        foreach (var item in storedQueries) queries.SelectedItems.Add(item);
+        var boundary = new ComboBox
+        {
+            ItemsSource = boundaryOptions,
+            SelectedItem = _distanceBoundaryLabel,
+            Width = 320,
+            HorizontalAlignment = HorizontalAlignment.Left,
+        };
+        AutomationProperties.SetName(boundary, _localization["Boundary"]);
         var stack = new StackPanel { Margin = new Thickness(0, 18, 0, 0) };
-        stack.Children.Add(new TextBlock { Text = _localization["TargetCellType"], FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 6) });
+        var hasCellTypes = _resolvedCellTypes.Count > 0;
+        var hasBoundaries = boundaryOptions.Length > 0;
+        var workflowReady = _sections.First(section => section.Key == "distance").Status != WorkflowStatus.NotStarted;
+        if (!workflowReady) stack.Children.Add(CreateInlineNotice(_localization["CompletePreviousSteps"], warning: true));
+        else
+        {
+            if (!hasCellTypes) stack.Children.Add(CreateInlineNotice(_localization["PrerequisiteCellTypes"], warning: true));
+            if (mode == "boundary" && !hasBoundaries) stack.Children.Add(CreateInlineNotice(_localization["PrerequisiteRegion"], warning: true));
+        }
+        stack.Children.Add(CreateFieldLabel(_localization["TargetCellType"], new Thickness(0, 0, 0, 6)));
         stack.Children.Add(target);
-        stack.Children.Add(new TextBlock { Text = _localization["QueryCellTypes"], FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 14, 0, 6) });
+        stack.Children.Add(CreateFieldLabel(_localization["QueryCellTypes"], new Thickness(0, 16, 0, 6)));
         stack.Children.Add(queries);
         if (mode == "boundary")
         {
-            stack.Children.Add(new TextBlock { Text = _localization["Boundary"], FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 14, 0, 6) });
+            stack.Children.Add(CreateFieldLabel(_localization["Boundary"], new Thickness(0, 16, 0, 6)));
             stack.Children.Add(boundary);
         }
         var runLabel = mode == "boundary" ? _localization["RunBoundaryDistance"] : _localization["RunNearestDistance"];
@@ -1906,43 +2500,123 @@ public partial class MainWindow : Window
             var result = await RunWorkflowAsync("distance", "distance", new
             {
                 mode,
-                targetType = target.SelectedItem?.ToString(),
-                queryTypes = queries.SelectedItems.Cast<string>().ToArray(),
-                boundaryLabel = boundary.SelectedItem?.ToString(),
+                targetType = mode == "boundary" ? _boundaryDistanceTarget : _nearestDistanceTarget,
+                queryTypes = storedQueries.ToArray(),
+                boundaryLabel = mode == "boundary" ? _distanceBoundaryLabel : null,
             });
             if (result is null) return;
             _previewPaths[$"distance_{mode}"] = result.Value.TryGetProperty("previewPath", out var preview) && preview.ValueKind == JsonValueKind.String ? preview.GetString() ?? string.Empty : string.Empty;
             CaptureExportPaths(result.Value);
-            DetailHost.Content = BuildDistanceView();
+            RefreshSectionViewIfSelected("distance");
         }, primary: true);
         run.Margin = new Thickness(0, 16, 0, 0);
-        stack.Children.Add(run);
-        if (_previewPaths.TryGetValue($"distance_{mode}", out var previewPath))
+        void RefreshRunAvailability()
         {
-            var preview = CreateImagePanel(runLabel, previewPath);
-            preview.Margin = new Thickness(0, 18, 0, 0);
-            stack.Children.Add(preview);
+            var available = workflowReady
+                && hasCellTypes
+                && !string.IsNullOrWhiteSpace(mode == "boundary" ? _boundaryDistanceTarget : _nearestDistanceTarget)
+                && storedQueries.Count > 0
+                && (mode != "boundary" || (hasBoundaries && !string.IsNullOrWhiteSpace(_distanceBoundaryLabel)));
+            SetActionAvailability(
+                run,
+                available,
+                !workflowReady
+                    ? _localization["CompletePreviousSteps"]
+                    : mode == "boundary" && !hasBoundaries ? _localization["PrerequisiteRegion"] : _localization["SelectCellTypeHelp"]);
         }
-        return new ScrollViewer { Content = CreateCard(runLabel, stack), VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        RefreshRunAvailability();
+        target.SelectionChanged += (_, _) =>
+        {
+            var selected = target.SelectedItem?.ToString();
+            var current = mode == "boundary" ? _boundaryDistanceTarget : _nearestDistanceTarget;
+            if (string.Equals(selected, current, StringComparison.Ordinal)) return;
+            if (mode == "boundary") _boundaryDistanceTarget = selected;
+            else _nearestDistanceTarget = selected;
+            InvalidateAfter("distance");
+            RefreshRunAvailability();
+        };
+        queries.SelectionChanged += (_, _) =>
+        {
+            var selected = queries.SelectedItems.Cast<string>().ToArray();
+            if (storedQueries.SequenceEqual(selected, StringComparer.Ordinal)) return;
+            if (mode == "boundary") _boundaryDistanceQueriesInitialized = true;
+            else _nearestDistanceQueriesInitialized = true;
+            storedQueries.Clear();
+            storedQueries.AddRange(selected);
+            InvalidateAfter("distance");
+            RefreshRunAvailability();
+        };
+        if (mode == "boundary")
+        {
+            boundary.SelectionChanged += (_, _) =>
+            {
+                var selected = boundary.SelectedItem?.ToString();
+                if (string.Equals(selected, _distanceBoundaryLabel, StringComparison.Ordinal)) return;
+                _distanceBoundaryLabel = selected;
+                InvalidateAfter("distance");
+                RefreshRunAvailability();
+            };
+        }
+        stack.Children.Add(run);
+        var content = new StackPanel();
+        content.Children.Add(CreateCard(
+            mode == "boundary" ? _localization["BoundaryDistanceSettings"] : _localization["NearestDistanceSettings"],
+            stack));
+        content.Children.Add(CreateCard(_localization["Preview"], CreateImagePanel(
+            runLabel,
+            _previewPaths.GetValueOrDefault($"distance_{mode}"),
+            emptyDetail: mode == "boundary" && !hasBoundaries
+                ? _localization["PrerequisiteRegion"]
+                : hasCellTypes ? _localization["RunAnalysisForPreview"] : _localization["PrerequisiteCellTypes"],
+            previewKey: $"distance_{mode}")));
+        return new ScrollViewer { Content = content, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
     }
 
     private UIElement BuildOutputsView()
     {
         var stack = new StackPanel();
-        var actions = new WrapPanel { Margin = new Thickness(0, 0, 0, 12) };
-        actions.Children.Add(CreateButton(_localization["RefreshOutputs"], async (_, _) => await RefreshOutputsAsync(), primary: true));
-        actions.Children.Add(CreateButton(_localization["OpenOutput"], (_, _) => OpenPath(_outputFolder)));
-        stack.Children.Add(actions);
-        var grid = new DataGrid { ItemsSource = _outputFiles, MinHeight = 520, IsReadOnly = true };
+        var grid = new DataGrid { ItemsSource = _outputFiles, MinHeight = 520, IsReadOnly = true, SelectionMode = DataGridSelectionMode.Single };
         grid.Columns.Add(new DataGridTextColumn { Header = _localization["Name"], Binding = new Binding(nameof(OutputFileRow.Name)), Width = 240 });
         grid.Columns.Add(new DataGridTextColumn { Header = _localization["GeneratedFiles"], Binding = new Binding(nameof(OutputFileRow.RelativePath)), Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
         grid.Columns.Add(new DataGridTextColumn { Header = _localization["Size"], Binding = new Binding(nameof(OutputFileRow.SizeText)), Width = 110 });
-        grid.MouseDoubleClick += (_, _) =>
+        void OpenSelectedFile()
         {
             if (grid.SelectedItem is OutputFileRow row) OpenPath(Path.Combine(_outputFolder, row.RelativePath));
+        }
+        var actions = new WrapPanel { Margin = new Thickness(0, 0, 0, 12) };
+        var refresh = CreateButton(_localization["RefreshOutputs"], async (_, _) => await RefreshOutputsAsync(), primary: true);
+        SetActionAvailability(
+            refresh,
+            _sections.First(section => section.Key == "outputs").Status != WorkflowStatus.NotStarted,
+            _localization["CompletePreviousSteps"]);
+        actions.Children.Add(refresh);
+        var openFolder = CreateButton(_localization["OpenOutput"], (_, _) => OpenPath(_outputFolder));
+        SetActionAvailability(openFolder, Directory.Exists(_outputFolder), _localization["ChooseFolder"]);
+        actions.Children.Add(openFolder);
+        var openSelected = CreateButton(_localization["OpenSelected"], (_, _) => OpenSelectedFile());
+        var selectFileHelp = _outputFiles.Count == 0
+            ? _localization["NoGeneratedFiles"]
+            : _localization["SelectGeneratedFile"];
+        SetActionAvailability(openSelected, false, selectFileHelp);
+        actions.Children.Add(openSelected);
+        stack.Children.Add(actions);
+        if (_outputFiles.Count == 0) stack.Children.Add(CreateInlineNotice(_localization["ResultsEmptyHint"]));
+        grid.SelectionChanged += (_, _) => SetActionAvailability(
+            openSelected,
+            grid.SelectedItem is OutputFileRow,
+            selectFileHelp);
+        grid.MouseDoubleClick += (_, _) =>
+        {
+            OpenSelectedFile();
+        };
+        grid.PreviewKeyDown += (_, eventArgs) =>
+        {
+            if (eventArgs.Key != Key.Enter || grid.SelectedItem is not OutputFileRow) return;
+            OpenSelectedFile();
+            eventArgs.Handled = true;
         };
         stack.Children.Add(grid);
-        stack.Children.Add(new TextBlock { Text = _localization["ResultsStayEnglish"], FontSize = 12.5, Foreground = (Brush)FindResource("SecondaryTextBrush"), Margin = new Thickness(0, 10, 0, 0) });
+        stack.Children.Add(CreateSupportingText(_localization["ResultsStayEnglish"], new Thickness(0, 10, 0, 0)));
         return CreatePage(CreateCard(_localization["GeneratedFiles"], stack));
     }
 
@@ -1960,7 +2634,7 @@ public partial class MainWindow : Window
                 SizeBytes = file.GetProperty("size_bytes").GetInt64(),
             });
         }
-        DetailHost.Content = BuildOutputsView();
+        RefreshSectionViewIfSelected("outputs");
     }
 
     private async Task<JsonElement?> RunWorkflowAsync(string sectionKey, string command, object payload, bool completesSection = true)
@@ -1977,8 +2651,8 @@ public partial class MainWindow : Window
             return null;
         }
         var previousStatus = section.Status;
+        SetInteractionBusy(true);
         if (completesSection) InvalidateAfter(sectionKey);
-        _isBusy = true;
         _activeSectionKey = sectionKey;
         section.Status = WorkflowStatus.Running;
         OperationProgress.Value = 0;
@@ -2003,9 +2677,10 @@ public partial class MainWindow : Window
         }
         finally
         {
-            _isBusy = false;
+            SetInteractionBusy(false);
             _activeSectionKey = null;
             OperationProgress.Visibility = Visibility.Collapsed;
+            UpdateProgressMetadata();
         }
     }
 
@@ -2024,7 +2699,10 @@ public partial class MainWindow : Window
 
         void RemovePreviews(params string[] keys)
         {
-            foreach (var key in keys) _previewPaths.Remove(key);
+            foreach (var key in keys)
+            {
+                if (_previewPaths.Remove(key)) HideTaggedDetailElement($"preview:{key}");
+            }
         }
 
         if (index <= _sections.ToList().FindIndex(section => section.Key == "overlay"))
@@ -2036,11 +2714,13 @@ public partial class MainWindow : Window
         {
             RemovePreviews("nucleiOptimizer", "nuclei");
             _pendingNucleiRecommendation = null;
+            HideTaggedDetailElement("recommendation:nuclei");
         }
         if (index <= _sections.ToList().FindIndex(section => section.Key == "cellTypes"))
         {
             RemovePreviews("assignmentOptimizer", "cellTypes");
             _pendingAssignmentRecommendation = null;
+            HideTaggedDetailElement("recommendation:assignment");
             _resolvedCellTypes.Clear();
         }
         if (index <= _sections.ToList().FindIndex(section => section.Key == "neighborhood"))
@@ -2163,14 +2843,67 @@ public partial class MainWindow : Window
     {
         _statusResourceKey = null;
         StatusText.Text = message;
-        StatusText.Foreground = isError ? (Brush)FindResource("ErrorBrush") : (Brush)FindResource("TextBrush");
+        ApplyStatusTone(null, isError);
+    }
+
+    private string ChooseDefaultNucleusChannel()
+    {
+        static bool ContainsAny(string value, params string[] candidates) =>
+            candidates.Any(candidate => value.Contains(candidate, StringComparison.OrdinalIgnoreCase));
+
+        var usable = _channels
+            .Where(channel => !string.IsNullOrWhiteSpace(channel.Marker))
+            .ToList();
+        return usable.FirstOrDefault(channel => ContainsAny(channel.Marker, "DAPI", "Hoechst"))?.Marker
+            ?? usable.FirstOrDefault(channel => ContainsAny(channel.Marker, "nucleus", "nuclei"))?.Marker
+            ?? usable.FirstOrDefault(channel => ContainsAny(channel.Marker, "DNA", "histone", "Ir191", "Ir193"))?.Marker
+            ?? usable.FirstOrDefault()?.Marker
+            ?? string.Empty;
     }
 
     private void SetLocalizedStatus(string resourceKey, bool isError = false)
     {
         _statusResourceKey = resourceKey;
         StatusText.Text = _localization[resourceKey];
-        StatusText.Foreground = isError ? (Brush)FindResource("ErrorBrush") : (Brush)FindResource("TextBrush");
+        ApplyStatusTone(resourceKey, isError);
+    }
+
+    private void ApplyStatusTone(string? resourceKey, bool isError)
+    {
+        if (isError)
+        {
+            StatusSurface.Background = new SolidColorBrush(Color.FromRgb(253, 242, 242));
+            StatusText.Foreground = (Brush)FindResource("ErrorBrush");
+            StatusIcon.Foreground = (Brush)FindResource("ErrorBrush");
+            StatusIcon.Text = "\uE783";
+            AutomationProperties.SetLiveSetting(StatusSurface, AutomationLiveSetting.Assertive);
+            return;
+        }
+
+        var isSuccess = resourceKey is "AnalysisComplete" or "ConfigurationSaved" or "ExistingResultsRestored" or "SuggestedComboApplied";
+        var isRunning = resourceKey is "Running" or "CheckingExistingResults";
+        if (isSuccess)
+        {
+            StatusSurface.Background = new SolidColorBrush(Color.FromRgb(234, 247, 239));
+            StatusText.Foreground = (Brush)FindResource("CompleteBrush");
+            StatusIcon.Foreground = (Brush)FindResource("CompleteBrush");
+            StatusIcon.Text = "\uE73E";
+        }
+        else if (isRunning)
+        {
+            StatusSurface.Background = new SolidColorBrush(Color.FromRgb(255, 244, 229));
+            StatusText.Foreground = (Brush)FindResource("RunningBrush");
+            StatusIcon.Foreground = (Brush)FindResource("RunningBrush");
+            StatusIcon.Text = "\uE895";
+        }
+        else
+        {
+            StatusSurface.Background = new SolidColorBrush(Color.FromRgb(239, 246, 247));
+            StatusText.Foreground = (Brush)FindResource("TextBrush");
+            StatusIcon.Foreground = (Brush)FindResource("AccentBrush");
+            StatusIcon.Text = "\uE946";
+        }
+        AutomationProperties.SetLiveSetting(StatusSurface, AutomationLiveSetting.Polite);
     }
 
     private string LocalizeEngineError(string message)
@@ -2225,6 +2958,20 @@ public partial class MainWindow : Window
         if (!element.TryGetProperty(propertyName, out var property) || property.ValueKind != JsonValueKind.String) return false;
         value = property.GetString() ?? string.Empty;
         return value.Length > 0;
+    }
+
+    private static bool TryGetJsonStringArray(JsonElement element, string propertyName, out List<string> values)
+    {
+        values = [];
+        if (!element.TryGetProperty(propertyName, out var property) || property.ValueKind != JsonValueKind.Array)
+            return false;
+        values = property.EnumerateArray()
+            .Where(item => item.ValueKind == JsonValueKind.String)
+            .Select(item => item.GetString()?.Trim() ?? string.Empty)
+            .Where(item => item.Length > 0)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        return true;
     }
 
     private static string JoinJsonStrings(JsonElement element, string propertyName)

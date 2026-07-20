@@ -4,6 +4,7 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:controls="clr-namespace:SpatialScope.Windows.Controls"
+        xmlns:automation="clr-namespace:System.Windows.Automation;assembly=PresentationCore"
         mc:Ignorable="d"
         Title="SpatialScope"
         Width="1440"
@@ -93,8 +94,9 @@
         </Style>
 
         <Style x:Key="SectionTitleStyle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
             <Setter Property="FontFamily" Value="{DynamicResource DisplayFont}" />
-            <Setter Property="FontSize" Value="17" />
+            <Setter Property="FontSize" Value="18" />
             <Setter Property="FontWeight" Value="SemiBold" />
             <Setter Property="Margin" Value="0,0,0,14" />
         </Style>
@@ -104,10 +106,17 @@
             <Setter Property="Foreground" Value="White" />
             <Setter Property="BorderBrush" Value="#006A75" />
             <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="FontSize" Value="14" />
             <Setter Property="FontWeight" Value="SemiBold" />
-            <Setter Property="Padding" Value="16,9" />
-            <Setter Property="MinHeight" Value="38" />
+            <Setter Property="Padding" Value="16,10" />
+            <Setter Property="MinHeight" Value="40" />
             <Setter Property="Cursor" Value="Hand" />
+            <Style.Triggers>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Opacity" Value="0.5" />
+                    <Setter Property="Cursor" Value="Arrow" />
+                </Trigger>
+            </Style.Triggers>
         </Style>
 
         <Style x:Key="SecondaryButtonStyle" TargetType="Button">
@@ -115,10 +124,17 @@
             <Setter Property="Foreground" Value="#086C77" />
             <Setter Property="BorderBrush" Value="#C8DEE1" />
             <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="FontSize" Value="14" />
             <Setter Property="FontWeight" Value="SemiBold" />
-            <Setter Property="Padding" Value="13,7" />
-            <Setter Property="MinHeight" Value="36" />
+            <Setter Property="Padding" Value="13,9" />
+            <Setter Property="MinHeight" Value="40" />
             <Setter Property="Cursor" Value="Hand" />
+            <Style.Triggers>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Opacity" Value="0.5" />
+                    <Setter Property="Cursor" Value="Arrow" />
+                </Trigger>
+            </Style.Triggers>
         </Style>
 
         <Style x:Key="SegmentedModeButtonStyle" TargetType="RadioButton">
@@ -126,6 +142,7 @@
             <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
             <Setter Property="BorderBrush" Value="Transparent" />
             <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="FontSize" Value="14" />
             <Setter Property="FontWeight" Value="SemiBold" />
             <Setter Property="MinHeight" Value="42" />
             <Setter Property="Padding" Value="16,9" />
@@ -157,7 +174,7 @@
                                 <Setter Property="Foreground" Value="White" />
                             </Trigger>
                             <Trigger Property="IsKeyboardFocused" Value="True">
-                                <Setter TargetName="SegmentBorder" Property="BorderBrush" Value="#F59E0B" />
+                                <Setter TargetName="SegmentBorder" Property="BorderBrush" Value="{StaticResource FocusBrush}" />
                                 <Setter TargetName="SegmentBorder" Property="BorderThickness" Value="2" />
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
@@ -169,9 +186,133 @@
             </Setter>
         </Style>
 
+        <Style x:Key="WorkflowNavigationButtonStyle" TargetType="Button">
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="NavigationBorder"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="7"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="NavigationBorder" Property="Opacity" Value="0.9" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="NavigationBorder" Property="Opacity" Value="0.78" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="NavigationBorder" Property="BorderBrush" Value="{StaticResource FocusBrush}" />
+                                <Setter TargetName="NavigationBorder" Property="BorderThickness" Value="2" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <!-- Workflow navigation is disabled while an analysis runs,
+                                     but semantic status colors must remain fully visible. -->
+                                <Setter TargetName="NavigationBorder" Property="Opacity" Value="1" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="WorkflowTabControlStyle" TargetType="TabControl">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TabControl">
+                        <Grid KeyboardNavigation.TabNavigation="Local">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+                            <Border Grid.Row="0"
+                                    HorizontalAlignment="Center"
+                                    Background="#F0F5F6"
+                                    BorderBrush="#CEDCDF"
+                                    BorderThickness="1"
+                                    CornerRadius="8"
+                                    Padding="3"
+                                    Margin="0,0,0,16">
+                                <TabPanel x:Name="HeaderPanel"
+                                          IsItemsHost="True"
+                                          KeyboardNavigation.TabIndex="1"
+                                          Panel.ZIndex="1" />
+                            </Border>
+                            <ContentPresenter x:Name="PART_SelectedContentHost"
+                                              Grid.Row="1"
+                                              ContentSource="SelectedContent"
+                                              SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}" />
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="WorkflowTabItemStyle" TargetType="TabItem">
+            <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="MinHeight" Value="42" />
+            <Setter Property="Padding" Value="18,10" />
+            <Setter Property="Margin" Value="1" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TabItem">
+                        <Border x:Name="TabBorder"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="6"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter ContentSource="Header"
+                                              HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              RecognizesAccessKey="True" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="TabBorder" Property="Background" Value="#E3F0F2" />
+                                <Setter TargetName="TabBorder" Property="BorderBrush" Value="#B8D5D9" />
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="TabBorder" Property="Background" Value="{StaticResource AccentBrush}" />
+                                <Setter TargetName="TabBorder" Property="BorderBrush" Value="#006A75" />
+                                <Setter Property="Foreground" Value="White" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="TabBorder" Property="BorderBrush" Value="{StaticResource FocusBrush}" />
+                                <Setter TargetName="TabBorder" Property="BorderThickness" Value="2" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.55" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <Style TargetType="TextBox">
-            <Setter Property="MinHeight" Value="36" />
-            <Setter Property="Padding" Value="10,7" />
+            <Setter Property="MinHeight" Value="40" />
+            <Setter Property="Padding" Value="10,8" />
             <Setter Property="VerticalContentAlignment" Value="Center" />
             <Setter Property="BorderBrush" Value="#CDD7DA" />
             <Setter Property="BorderThickness" Value="1" />
@@ -180,11 +321,33 @@
         </Style>
 
         <Style TargetType="ComboBox">
-            <Setter Property="MinHeight" Value="36" />
-            <Setter Property="Padding" Value="8,4" />
+            <Setter Property="MinHeight" Value="40" />
+            <Setter Property="Padding" Value="8,5" />
             <Setter Property="VerticalContentAlignment" Value="Center" />
             <Setter Property="BorderBrush" Value="#CDD7DA" />
             <Setter Property="Background" Value="#FAFFFFFF" />
+            <Setter Property="FontSize" Value="14" />
+        </Style>
+
+        <Style TargetType="CheckBox">
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="MinHeight" Value="36" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+        </Style>
+
+        <Style TargetType="ListBox">
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="BorderBrush" Value="#CDD7DA" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Background" Value="#FAFFFFFF" />
+            <Setter Property="Padding" Value="4" />
+        </Style>
+
+        <Style TargetType="ListBoxItem">
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="MinHeight" Value="36" />
+            <Setter Property="Padding" Value="8,6" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
         </Style>
 
         <Style TargetType="DataGrid">
@@ -194,10 +357,29 @@
             <Setter Property="GridLinesVisibility" Value="Horizontal" />
             <Setter Property="HorizontalGridLinesBrush" Value="#E2E7E9" />
             <Setter Property="BorderBrush" Value="#D6DEE1" />
-            <Setter Property="RowHeight" Value="44" />
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="RowHeight" Value="48" />
             <Setter Property="HeadersVisibility" Value="Column" />
-            <Setter Property="ColumnHeaderHeight" Value="38" />
+            <Setter Property="ColumnHeaderHeight" Value="42" />
             <Setter Property="Background" Value="Transparent" />
+        </Style>
+
+        <Style TargetType="DataGridColumnHeader">
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Padding" Value="10,8" />
+            <Setter Property="Background" Value="#F2F6F7" />
+            <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+            <Setter Property="BorderBrush" Value="#D6DEE1" />
+            <Setter Property="BorderThickness" Value="0,0,1,1" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+        </Style>
+
+        <Style TargetType="DataGridCell">
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="Padding" Value="8,5" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="BorderThickness" Value="0" />
         </Style>
     </Window.Resources>
 
@@ -262,19 +444,21 @@
                     <ItemsControl x:Name="WorkflowItemsControl" Margin="12,0,12,8">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
-                                <Border Background="{Binding StatusBackground}"
+                                <Button Style="{StaticResource WorkflowNavigationButtonStyle}"
+                                        Background="{Binding StatusBackground}"
                                         BorderBrush="{Binding BorderBrush}"
                                         BorderThickness="{Binding BorderThickness}"
-                                        CornerRadius="7"
                                         Margin="0,4"
                                         Padding="11,9"
-                                        Cursor="Hand"
-                                        Tag="{Binding Key}"
-                                        MouseLeftButtonUp="WorkflowRow_MouseLeftButtonUp">
+                                        CommandParameter="{Binding Key}"
+                                        automation:AutomationProperties.Name="{Binding Title}"
+                                        automation:AutomationProperties.HelpText="{Binding StatusDisplayText}"
+                                        Click="WorkflowRow_Click">
                                     <Grid>
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="30" />
                                             <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
                                         </Grid.ColumnDefinitions>
                                         <TextBlock Text="{Binding IconGlyph}"
                                                    FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
@@ -288,10 +472,18 @@
                                                 <TextBlock Text="  " />
                                                 <TextBlock Text="{Binding Title}" FontSize="15" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                                             </StackPanel>
-                                            <TextBlock Text="{Binding Subtitle}" FontSize="12" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,3,0,0" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Text="{Binding Subtitle}" FontSize="13" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,3,0,0" TextTrimming="CharacterEllipsis" />
                                         </StackPanel>
+                                        <TextBlock Grid.Column="2"
+                                                   Text="{Binding StatusGlyph}"
+                                                   FontFamily="Segoe UI Symbol, Segoe UI"
+                                                   FontSize="15"
+                                                   FontWeight="SemiBold"
+                                                   Foreground="{Binding StatusForeground}"
+                                                   Margin="8,1,0,0"
+                                                   VerticalAlignment="Top" />
                                     </Grid>
-                                </Border>
+                                </Button>
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
@@ -364,7 +556,7 @@
                         <TextBlock x:Name="HeaderSubtitle" FontSize="14" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,2,0,0" />
                     </StackPanel>
                     <Border x:Name="HeaderStatusBadge" Grid.Column="2" CornerRadius="15" Padding="11,5" VerticalAlignment="Center">
-                        <TextBlock x:Name="HeaderStatusText" FontSize="12" FontWeight="SemiBold" />
+                        <TextBlock x:Name="HeaderStatusText" Style="{StaticResource StatusTextStyle}" />
                     </Border>
                 </Grid>
             </Border>
@@ -379,7 +571,28 @@
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <ProgressBar x:Name="OperationProgress" Width="150" Height="6" Maximum="1" Margin="0,0,12,0" VerticalAlignment="Center" Foreground="{StaticResource RunningBrush}" Visibility="Collapsed" />
-                    <TextBlock x:Name="StatusText" Grid.Column="1" FontSize="13" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                    <Border x:Name="StatusSurface"
+                            Grid.Column="1"
+                            Background="Transparent"
+                            CornerRadius="6"
+                            Padding="8,5"
+                            Margin="0,-4,12,-4"
+                            automation:AutomationProperties.LiveSetting="Polite">
+                        <DockPanel LastChildFill="True">
+                            <TextBlock x:Name="StatusIcon"
+                                       DockPanel.Dock="Left"
+                                       Text="&#xE946;"
+                                       FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                                       FontSize="15"
+                                       Width="24"
+                                       VerticalAlignment="Center" />
+                            <TextBlock x:Name="StatusText"
+                                       Style="{StaticResource SupportingTextStyle}"
+                                       Foreground="{StaticResource TextBrush}"
+                                       VerticalAlignment="Center"
+                                       TextTrimming="CharacterEllipsis" />
+                        </DockPanel>
+                    </Border>
                     <Button x:Name="OpenOutputButton" Grid.Column="2" Style="{StaticResource SecondaryButtonStyle}" Click="OpenOutputButton_Click" />
                 </Grid>
             </Border>

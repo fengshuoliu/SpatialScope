@@ -16,6 +16,41 @@ def _load_json(path: Path) -> Any:
         return json.load(handle)
 
 
+def _first_value(raw: dict[str, Any], *keys: str, default: Any = None) -> Any:
+    for key in keys:
+        if key in raw and raw[key] is not None:
+            return raw[key]
+    return default
+
+
+def _reference_nucleus_channel(reference_output: Path, pipeline: dict[str, Any]) -> str:
+    configured = _first_value(pipeline, "nucleusChannel", "nucleus_channel")
+    if configured:
+        return str(configured)
+
+    # Engine-written pipeline_config.json uses snake_case and intentionally does
+    # not duplicate the step-specific nucleus channel. Recover it from the
+    # optimizer provenance written beside the reference segmentation.
+    provenance_candidates = (
+        reference_output / "02_nuclei_segmentation" / "nuclei_native_optimizer_grid.json",
+        reference_output / "02_nuclei_segmentation" / "nuclei_optimizer_grid.json",
+    )
+    for path in provenance_candidates:
+        if not path.is_file():
+            continue
+        provenance = _load_json(path)
+        configured = _first_value(provenance, "nucleus_channel", "nucleusChannel")
+        if not configured and isinstance(provenance.get("base_params"), dict):
+            configured = provenance["base_params"].get("NUCLEUS_CHANNEL")
+        if configured:
+            return str(configured)
+
+    raise ValueError(
+        "The reference output does not identify its nucleus channel in "
+        "pipeline_config.json or nuclei optimizer provenance."
+    )
+
+
 def _snake_nuclei_parameters(raw: dict[str, Any], nucleus_channel: str) -> dict[str, Any]:
     return {
         "nucleus_channel": nucleus_channel,
@@ -81,7 +116,7 @@ def _require_files(paths: Sequence[str | Path], label: str) -> None:
         raise AssertionError(f"{label} did not create required files: {missing}")
 
 
-def _require_exact_reference_labels(native_path: Path, reference_path: Path) -> int:
+def _require_exact_reference_labels(native_path: Path, reference_path: Path) -> tuple[int, int]:
     reference = _load_json(reference_path)
     width = int(reference["width"])
     height = int(reference["height"])
@@ -98,7 +133,10 @@ def _require_exact_reference_labels(native_path: Path, reference_path: Path) -> 
             "Native nuclei label map does not match the macOS reference: "
             f"{mismatch_count:,} pixels differ."
         )
-    return mismatch_count
+    reference_nuclei_count = int(np.unique(expected[expected > 0]).size)
+    if reference_nuclei_count <= 0:
+        raise AssertionError("The macOS reference label map contains no nuclei.")
+    return mismatch_count, reference_nuclei_count
 
 
 def run_real_data_smoke(
@@ -127,21 +165,16 @@ def run_real_data_smoke(
         reference_output / "03_cell_type_definition" / "celltype_config.json"
     )
     cell_types = _cell_types(celltype_reference)
-    nucleus_channel = str(pipeline["nucleusChannel"])
+    nucleus_channel = _reference_nucleus_channel(reference_output, pipeline)
     nuclei_parameters = _snake_nuclei_parameters(nuclei_reference, nucleus_channel)
     assignment_parameters = _snake_assignment_parameters(assignment_reference)
-    reference_nuclei_summary = (
-        reference_output / "02_nuclei_segmentation" / "nuclei_summary.csv"
-    )
-    with reference_nuclei_summary.open("r", encoding="utf-8-sig") as handle:
-        reference_nuclei_count = max(0, sum(1 for _ in handle) - 1)
-
     channels = [
         {
             "file": str(channel["file"]),
             "channel": str(channel["channel"]),
-            "colorHex": str(channel["colorHex"]),
-            "includeOverlay": str(channel["channel"]) in set(pipeline.get("overlayChannels", [])),
+            "colorHex": str(_first_value(channel, "colorHex", "color_hex")),
+            "includeOverlay": str(channel["channel"])
+            in set(_first_value(pipeline, "overlayChannels", "overlay_channels", default=[])),
         }
         for channel in pipeline["channels"]
     ]
@@ -158,10 +191,16 @@ def run_real_data_smoke(
             {
                 "inputFolder": str(input_folder),
                 "outputFolder": str(output_folder),
-                "pixelSizeUm": pipeline.get("pixelSizeUm", [1.0, 1.0]),
-                "imageId": str(pipeline.get("imageID") or "FieldA"),
-                "whiteChannel": pipeline.get("whiteChannel"),
-                "whiteWeight": float(pipeline.get("whiteWeight", 0.0)),
+                "pixelSizeUm": _first_value(
+                    pipeline, "pixelSizeUm", "pixel_size_um", default=[1.0, 1.0]
+                ),
+                "imageId": str(
+                    _first_value(pipeline, "imageID", "imageId", "image_id", default="FieldA")
+                ),
+                "whiteChannel": _first_value(pipeline, "whiteChannel", "white_channel"),
+                "whiteWeight": float(
+                    _first_value(pipeline, "whiteWeight", "white_weight", default=0.0)
+                ),
                 "channels": channels,
             },
         )
@@ -204,16 +243,16 @@ def run_real_data_smoke(
         nuclei_count = int(nuclei["summary"]["nNuclei"])
         if nuclei_count <= 0:
             raise AssertionError("Nuclei segmentation did not find any nuclei.")
-        if reference_nuclei_count and nuclei_count != reference_nuclei_count:
-            raise AssertionError(
-                "Native nuclei result does not match the reference macOS result: "
-                f"{nuclei_count} versus {reference_nuclei_count}."
-            )
         _require_files([nuclei["previewPath"]], "Nuclei Segmentation")
-        label_map_mismatch_count = _require_exact_reference_labels(
+        label_map_mismatch_count, reference_nuclei_count = _require_exact_reference_labels(
             output_folder / "02_nuclei_segmentation" / "nuclei_labels_uint16.tiff",
             reference_output / "02_nuclei_segmentation" / "nuclei_label_map.json",
         )
+        if nuclei_count != reference_nuclei_count:
+            raise AssertionError(
+                "Native nuclei result does not match the reference label map: "
+                f"{nuclei_count} versus {reference_nuclei_count}."
+            )
 
         assignment_optimizer = engine.request(
             "celltype_optimizer",
