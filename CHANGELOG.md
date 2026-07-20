@@ -2,6 +2,15 @@
 
 All notable changes to SpatialScope are documented here.
 
+## 1.2.3 - 2026-07-20 (Windows)
+
+- Rebuilt Region Analysis around a saved ROI catalog, explicit computational and manual workflows, adjustable display styling, and custom exports.
+- Added a high-contrast white drawing cursor and boundary feedback for polygon and free-draw Region editing.
+- Kept scientific previews fit to the complete image field and reserved Ctrl+wheel for deliberate zoom, preventing ordinary page scrolling from cropping plots.
+- Split Cell Distribution into boundary-banded regions and cell density by boundary distance, with persistent multi-cell-type selection and the Apple-style density line plot.
+- Preserved distribution artifacts inside the output folder selected during restore, including when a saved project is copied or moved.
+- Expanded release gates for Region filtering/registry behavior, distribution preview/restore contracts, frozen SVG rendering, and the complete nine-stage workflow.
+
 ## 1.2.2 - 2026-07-20 (Windows)
 
 - Reorganized the native Windows interface with a consistent typography scale, clearer section hierarchy, and more readable control spacing.

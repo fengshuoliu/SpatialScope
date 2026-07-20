@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import csv
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -10,9 +13,31 @@ import tempfile
 from pathlib import Path
 from typing import Any, Sequence
 
+from PIL import Image
+
 
 WINDOWS_DIR = Path(__file__).resolve().parents[1]
 ENGINE_SCRIPT = WINDOWS_DIR / "backend" / "native_engine.py"
+BACKEND_SRC = WINDOWS_DIR / "backend" / "src"
+if str(BACKEND_SRC) not in sys.path:
+    sys.path.insert(0, str(BACKEND_SRC))
+
+from spatialscope_analysis.models import RegionParams  # noqa: E402
+
+
+def _assert_png_backed_svg(png_path: Path, svg_path: Path) -> None:
+    if not png_path.is_file() or not svg_path.is_file():
+        raise AssertionError(f"Missing Region PNG/SVG export pair: {png_path}, {svg_path}")
+    svg_text = svg_path.read_text(encoding="utf-8")
+    match = re.search(r'href="data:image/png;base64,([^"]+)"', svg_text)
+    if match is None or "<svg" not in svg_text:
+        raise AssertionError(f"Region SVG does not contain an embedded PNG image: {svg_path}")
+    try:
+        embedded_png = base64.b64decode(match.group(1), validate=True)
+    except ValueError as error:
+        raise AssertionError(f"Region SVG contains invalid base64 image data: {svg_path}") from error
+    if embedded_png != png_path.read_bytes():
+        raise AssertionError(f"Region SVG does not preserve the exact PNG rendering: {svg_path}")
 
 
 class EngineProcess:
@@ -109,11 +134,24 @@ def prepare_smoke_output_folder(output_folder: Path) -> Path:
 def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: Path) -> dict[str, Any]:
     output_folder = prepare_smoke_output_folder(output_folder)
 
+    if RegionParams(selected_types=[]).line_style != "-":
+        raise AssertionError("The shared Region parameter model does not default to a solid boundary line.")
+
     engine = EngineProcess(engine_command)
     try:
         hello = engine.request("hello", {})
         if hello["protocolVersion"] != 1:
             raise AssertionError(f"Unexpected engine protocol: {hello}")
+        required_region_capabilities = {
+            "region",
+            "region_preview",
+            "region_manual_preview",
+            "region_manual_save",
+            "region_custom_export",
+        }
+        missing_region_capabilities = required_region_capabilities.difference(hello.get("capabilities", []))
+        if missing_region_capabilities:
+            raise AssertionError(f"Engine is missing Region capabilities: {sorted(missing_region_capabilities)}")
         expected_cpu_count = max(1, os.cpu_count() or 1)
         compute = hello.get("compute", {})
         if int(compute.get("defaultCpuWorkers", 0)) != expected_cpu_count:
@@ -294,10 +332,66 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
             "selectedTypes": [resolved_types[0]],
             "contourDownsample": 2,
             "lineWidth": 2.0,
-            "lineStyle": "--",
+            "lineStyle": "-",
             "boundaryColor": "#A1D99B",
             "useTypeColors": False,
         }
+        if region.get("parameters") != expected_region_parameters:
+            raise AssertionError(f"Region response did not normalize all ten parameters: {region.get('parameters')}")
+        if int(region.get("width", 0)) <= 0 or int(region.get("height", 0)) <= 0:
+            raise AssertionError(f"Region response did not include source dimensions: {region}")
+        source_width = int(region["width"])
+        source_height = int(region["height"])
+        for preview_key in ("overlayPreviewPath", "maskPreviewPath"):
+            preview_path = Path(str(region.get(preview_key) or ""))
+            if not preview_path.is_file():
+                raise AssertionError(f"Region response omitted {preview_key}: {region}")
+            with Image.open(preview_path) as preview_image:
+                if preview_image.size != (source_width, source_height):
+                    raise AssertionError(f"{preview_key} is not source-pixel sized: {preview_image.size}")
+        with Image.open(Path(region["comparisonPreviewPath"])) as comparison_image:
+            if comparison_image.size != (source_width * 2 + 24, source_height):
+                raise AssertionError(f"Region comparison preview has the wrong panel geometry: {comparison_image.size}")
+        with Image.open(Path(region["overlayPreviewPath"])) as overlay_panel, Image.open(
+            Path(region["maskPreviewPath"])
+        ) as mask_panel:
+            if overlay_panel.convert("RGB").tobytes() == mask_panel.convert("RGB").tobytes():
+                raise AssertionError("Region comparison reused the cell-type mask instead of a multiplex overlay.")
+        if region.get("previewPath") != region.get("comparisonPreviewPath"):
+            raise AssertionError("The main Region preview is not the overlay/mask comparison.")
+        expected_region_row_keys = {
+            "id",
+            "label",
+            "sourceType",
+            "dominantType",
+            "cellCount",
+            "areaUm2",
+            "colorHex",
+            "countsByType",
+        }
+        if len(region.get("regions", [])) != len(region["boundaries"]):
+            raise AssertionError("Region rows and selectable boundaries are out of sync.")
+        for row in region["regions"]:
+            if set(row) != expected_region_row_keys:
+                raise AssertionError(f"Region row has an unexpected schema: {row}")
+            if not str(row["id"]).startswith("roi_") or len(str(row["id"])) != 20:
+                raise AssertionError(f"Region row has no stable ROI id: {row}")
+            if int(row["cellCount"]) <= 0 or float(row["areaUm2"]) <= 0:
+                raise AssertionError(f"Region response exposed an empty boundary: {row}")
+            if not set(row["countsByType"]).issubset(resolved_types):
+                raise AssertionError(f"Region row contains unavailable cell types: {row}")
+        for item in region.get("dominantCounts", []):
+            if set(item) != {"name", "count", "colorHex"}:
+                raise AssertionError(f"Dominant-count row has an unexpected schema: {item}")
+        for boundary in region["boundaries"]:
+            if set(boundary) != {"id", "label", "path", "sourceType"}:
+                raise AssertionError(f"Region boundary has an unexpected schema: {boundary}")
+            boundary_path = Path(boundary["path"])
+            if not boundary_path.is_file():
+                raise AssertionError(f"Region boundary mask is missing: {boundary_path}")
+            with Image.open(boundary_path) as boundary_image:
+                if boundary_image.getbbox() is None:
+                    raise AssertionError(f"Region response exposed an empty boundary mask: {boundary_path}")
         region_state = json.loads(workflow_state_path.read_text(encoding="utf-8"))
         if region_state.get("analysisParameters") != {
             "neighborhood": expected_neighborhood_parameters,
@@ -307,6 +401,305 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
                 "Region settings did not preserve neighborhood settings: "
                 f"{region_state.get('analysisParameters')}"
             )
+
+        base_region_ids = {str(row["id"]) for row in region["regions"]}
+        filtered_preview_payload = {
+            "selectedBoundaryIds": [region["regions"][0]["id"]],
+            "selectedCellTypes": resolved_types[:2],
+            "previewKey": "display-panel",
+            "lineWidth": 3.0,
+            "lineStyle": "-.",
+            "boundaryColor": "#FF8800",
+            "useTypeColors": False,
+        }
+        state_before_region_preview = json.loads(workflow_state_path.read_text(encoding="utf-8"))
+        filtered_preview = engine.request("region_preview", filtered_preview_payload)
+        if (int(filtered_preview["width"]), int(filtered_preview["height"])) != (
+            int(region["width"]),
+            int(region["height"]),
+        ):
+            raise AssertionError(f"Filtered Region preview changed the source aspect: {filtered_preview}")
+        if filtered_preview.get("boundaryCellTypeMode") != "content" or int(filtered_preview.get("boundaryCount", 0)) != 1:
+            raise AssertionError(f"Filtered Region preview did not return its filtered boundary rows: {filtered_preview}")
+        global_selected_cell_count = sum(
+            int(assignment["summary"]["cellCounts"].get(cell_type, 0))
+            for cell_type in resolved_types[:2]
+        )
+        expected_filtered_cell_count = sum(
+            int(row.get("countsByType", {}).get(cell_type, 0))
+            for row in filtered_preview.get("regions", [])
+            for cell_type in resolved_types[:2]
+        )
+        if expected_filtered_cell_count >= global_selected_cell_count:
+            raise AssertionError(
+                "Synthetic Region preview no longer distinguishes in-ROI cells from the whole-image selected-cell count."
+            )
+        if int(filtered_preview.get("cellCount", -1)) != expected_filtered_cell_count or int(
+            filtered_preview.get("summary", {}).get("cellCount", -1)
+        ) != expected_filtered_cell_count:
+            raise AssertionError(
+                "Filtered Region preview did not count selected cell types within the displayed ROI: "
+                f"expected {expected_filtered_cell_count}, global {global_selected_cell_count}, "
+                f"response {filtered_preview}"
+            )
+        for preview_key in ("overlayPreviewPath", "maskPreviewPath"):
+            with Image.open(Path(filtered_preview[preview_key])) as preview_image:
+                if preview_image.size != (source_width, source_height):
+                    raise AssertionError(f"Filtered {preview_key} is not source-pixel sized: {preview_image.size}")
+        with Image.open(Path(filtered_preview["comparisonPreviewPath"])) as comparison_image:
+            if comparison_image.size != (source_width * 2 + 24, source_height):
+                raise AssertionError(f"Filtered Region comparison has the wrong geometry: {comparison_image.size}")
+        second_filtered_preview = engine.request(
+            "region_preview",
+            {**filtered_preview_payload, "previewKey": "customize-panel"},
+        )
+        if second_filtered_preview["previewPath"] == filtered_preview["previewPath"]:
+            raise AssertionError("Distinct Region preview keys reused the same cache path.")
+        if json.loads(workflow_state_path.read_text(encoding="utf-8")) != state_before_region_preview:
+            raise AssertionError("Read-only Region preview changed persisted workflow state.")
+
+        cells_summary_path = output_folder / "05_cell_type_assignment" / "cells_summary.csv"
+        with cells_summary_path.open("r", encoding="utf-8", newline="") as handle:
+            cell_rows = list(csv.DictReader(handle))
+        rows_by_type = {
+            cell_type: [row for row in cell_rows if str(row.get("celltype")) == cell_type]
+            for cell_type in resolved_types
+        }
+        manual_seed_type = max(resolved_types, key=lambda cell_type: len(rows_by_type[cell_type]))
+        manual_secondary_type = next(cell_type for cell_type in resolved_types if cell_type != manual_seed_type)
+        if len(rows_by_type[manual_seed_type]) < 2:
+            raise AssertionError("Synthetic assignment does not contain enough cells for manual Region editing.")
+        full_source_polygon = [
+            {"x": 0.0, "y": 0.0},
+            {"x": float(source_width - 1), "y": 0.0},
+            {"x": float(source_width - 1), "y": float(source_height - 1)},
+            {"x": 0.0, "y": float(source_height - 1)},
+        ]
+        manual_create_payload = {
+            "mode": "create",
+            "displayName": "Smoke manual ROI",
+            "polygons": [full_source_polygon],
+            "seedCellTypes": [manual_seed_type, manual_secondary_type],
+            "selectedCellTypes": resolved_types,
+            "closeUm": 0.0,
+            "dilateUm": 0.0,
+            "minAreaUm2": 0.0,
+            "minCells": 1,
+            "contourDownsample": 1,
+            "lineWidth": 3.0,
+            "lineStyle": "-.",
+            "boundaryColor": "#FF8800",
+            "useTypeColors": False,
+            "previewKey": "manual-create",
+        }
+        state_before_manual_preview = json.loads(workflow_state_path.read_text(encoding="utf-8"))
+        manual_preview = engine.request("region_manual_preview", manual_create_payload)
+        if manual_preview.get("summary", {}).get("region", {}).get("sourceType") != "manual":
+            raise AssertionError(f"Manual create preview did not return a manual Region row: {manual_preview}")
+        with Image.open(Path(manual_preview["previewPath"])) as preview_image:
+            if preview_image.size != (source_width, source_height):
+                raise AssertionError(f"Manual Region preview is not source-pixel sized: {preview_image.size}")
+        if json.loads(workflow_state_path.read_text(encoding="utf-8")) != state_before_manual_preview:
+            raise AssertionError("Manual Region preview changed persisted workflow state.")
+
+        manual_save = engine.request("region_manual_save", manual_create_payload)
+        manual_region_id = str(manual_save["summary"]["savedRegionId"])
+        manual_region_label = str(manual_save["summary"]["savedRegionLabel"])
+        saved_region_ids = {str(row["id"]) for row in manual_save["regions"]}
+        if not base_region_ids.issubset(saved_region_ids) or manual_region_id not in saved_region_ids:
+            raise AssertionError(f"Manual save did not preserve base boundaries and add the new ROI: {manual_save}")
+        saved_manual_row = next(row for row in manual_save["regions"] if str(row["id"]) == manual_region_id)
+        if saved_manual_row["sourceType"] != "manual" or saved_manual_row["label"] != manual_region_label:
+            raise AssertionError(f"Manual save returned the wrong Region metadata: {saved_manual_row}")
+        if int(saved_manual_row["countsByType"].get(manual_secondary_type, 0)) <= 0:
+            raise AssertionError(f"Manual multi-type ROI did not retain its secondary content: {saved_manual_row}")
+        if not manual_save.get("artifacts") or not all(
+            Path(record["absolutePath"]).is_file() for record in manual_save["artifacts"]
+        ):
+            raise AssertionError("Manual Region save did not return durable artifacts.")
+        manual_saved_state = json.loads(workflow_state_path.read_text(encoding="utf-8"))
+        expected_completed_through_region = {"inputs", "overlay", "nuclei", "cellTypes", "neighborhood", "region"}
+        if any(
+            bool(value) != (stage in expected_completed_through_region)
+            for stage, value in manual_saved_state["stages"].items()
+        ):
+            raise AssertionError(f"Manual Region save did not invalidate only downstream stages: {manual_saved_state['stages']}")
+        if manual_saved_state.get("analysisParameters") != {
+            "neighborhood": expected_neighborhood_parameters,
+            "region": expected_region_parameters,
+        }:
+            raise AssertionError("Manual Region save changed the applied computational Region parameters.")
+
+        manual_type_color_preview = engine.request(
+            "region_preview",
+            {
+                "selectedBoundaryIds": [manual_region_id],
+                "selectedCellTypes": [manual_seed_type],
+                "boundaryCellTypeMode": "source",
+                "previewKey": "manual-type-color",
+                "lineWidth": 1.0,
+                "lineStyle": "-",
+                "boundaryColor": "#010203",
+                "useTypeColors": True,
+            },
+        )
+        expected_manual_color_hex = next(
+            item["color_hex"] for item in cell_types() if item["name"] == manual_seed_type
+        )
+        expected_manual_rgb = tuple(
+            int(expected_manual_color_hex[index : index + 2], 16)
+            for index in (1, 3, 5)
+        )
+        manual_boundary_path = Path(
+            next(item["path"] for item in manual_save["boundaries"] if str(item["id"]) == manual_region_id)
+        )
+        with Image.open(manual_boundary_path) as boundary_image, Image.open(
+            Path(manual_type_color_preview["overlayPreviewPath"])
+        ) as overlay_image:
+            boundary_pixels = list(boundary_image.convert("L").getdata())
+            overlay_pixels = list(overlay_image.convert("RGB").getdata())
+            boundary_width, boundary_height = boundary_image.size
+            found_preferred_color = False
+            for y in range(1, boundary_height - 1):
+                for x in range(1, boundary_width - 1):
+                    offset = y * boundary_width + x
+                    if boundary_pixels[offset] <= 0:
+                        continue
+                    if all(
+                        boundary_pixels[neighbor] > 0
+                        for neighbor in (offset - 1, offset + 1, offset - boundary_width, offset + boundary_width)
+                    ):
+                        continue
+                    if overlay_pixels[offset] == expected_manual_rgb:
+                        found_preferred_color = True
+                        break
+                if found_preferred_color:
+                    break
+            if not found_preferred_color:
+                raise AssertionError(
+                    "useTypeColors did not color the manual ROI boundary from its preferred seed cell type."
+                )
+
+        content_filtered_preview = engine.request(
+            "region_preview",
+            {
+                "selectedBoundaryIds": [manual_region_id],
+                "selectedCellTypes": [manual_secondary_type],
+                "boundaryCellTypeMode": "content",
+                "previewKey": "manual-content-filter",
+            },
+        )
+        source_filtered_preview = engine.request(
+            "region_preview",
+            {
+                "selectedBoundaryIds": [manual_region_id],
+                "selectedCellTypes": [manual_secondary_type],
+                "boundaryCellTypeMode": "source",
+                "previewKey": "manual-source-filter",
+            },
+        )
+        if int(content_filtered_preview.get("boundaryCount", 0)) != 1:
+            raise AssertionError(f"Content-mode filtering ignored positive Region composition: {content_filtered_preview}")
+        if int(source_filtered_preview.get("boundaryCount", -1)) != 0:
+            raise AssertionError(f"Source-mode filtering did not use the preferred defining type: {source_filtered_preview}")
+        if source_filtered_preview.get("previewPath") != source_filtered_preview.get("maskPreviewPath"):
+            raise AssertionError("Source-mode Region preview is not the exact single-panel manual-editor raster.")
+        with Image.open(Path(source_filtered_preview["previewPath"])) as preview_image:
+            if preview_image.size != (source_width, source_height):
+                raise AssertionError(f"Source-mode manual editor preview changed source coordinates: {preview_image.size}")
+
+        include_preview = engine.request(
+            "region_manual_preview",
+            {
+                **manual_create_payload,
+                "mode": "include",
+                "displayName": "Smoke adjusted include",
+                "targetBoundaryLabel": region["boundaries"][0]["label"],
+                "seedCellTypes": [resolved_types[1]],
+                "selectedCellTypes": resolved_types[:2],
+                "previewKey": "manual-include",
+            },
+        )
+        if include_preview.get("summary", {}).get("mode") != "include":
+            raise AssertionError(f"Manual include preview did not run include mode: {include_preview}")
+
+        excluded_row = rows_by_type[manual_seed_type][0]
+        excluded_x = int(round(float(excluded_row["centroid_x_px"])))
+        excluded_y = int(round(float(excluded_row["centroid_y_px"])))
+        local_polygon = [
+            {"x": float(excluded_x - 2), "y": float(excluded_y - 2)},
+            {"x": float(excluded_x + 2), "y": float(excluded_y - 2)},
+            {"x": float(excluded_x + 2), "y": float(excluded_y + 2)},
+            {"x": float(excluded_x - 2), "y": float(excluded_y + 2)},
+        ]
+        exclude_preview = engine.request(
+            "region_manual_preview",
+            {
+                **manual_create_payload,
+                "mode": "exclude",
+                "displayName": "Smoke adjusted exclude",
+                "targetBoundaryLabel": manual_region_label,
+                "polygons": [local_polygon],
+                "seedCellTypes": [manual_seed_type],
+                "selectedCellTypes": [manual_seed_type],
+                "previewKey": "manual-exclude",
+            },
+        )
+        exclude_summary = exclude_preview.get("summary", {})
+        if exclude_summary.get("mode") != "exclude" or not (
+            0 < int(exclude_summary.get("resultSeedCellCount", 0)) < int(exclude_summary.get("baseCellCount", 0))
+        ):
+            raise AssertionError(f"Manual exclude preview did not remove a target seed cell: {exclude_preview}")
+        if json.loads(workflow_state_path.read_text(encoding="utf-8")) != manual_saved_state:
+            raise AssertionError("Manual include/exclude previews changed persisted workflow state.")
+
+        custom_export = engine.request(
+            "region_custom_export",
+            {
+                "selectedBoundaryIds": [manual_region_id],
+                "selectedCellTypes": [manual_secondary_type],
+                "boundaryCellTypeMode": "content",
+                "lineWidth": 4.0,
+                "lineStyle": ":",
+                "boundaryColor": "#22CCFF",
+                "useTypeColors": False,
+                "contourDownsample": 1,
+            },
+        )
+        if int(custom_export.get("boundaryCount", 0)) != 1 or custom_export.get("boundaryCellTypeMode") != "content":
+            raise AssertionError(f"Customized export did not apply content-mode boundary filtering: {custom_export}")
+        for preview_key in (
+            "overlayPreviewPath",
+            "maskPreviewPath",
+            "originalOverlayPreviewPath",
+            "originalMaskPreviewPath",
+        ):
+            with Image.open(Path(custom_export[preview_key])) as preview_image:
+                if preview_image.size != (source_width, source_height):
+                    raise AssertionError(f"Customized {preview_key} is not source-pixel sized: {preview_image.size}")
+        for preview_key in ("comparisonPreviewPath", "originalComparisonPreviewPath"):
+            with Image.open(Path(custom_export[preview_key])) as preview_image:
+                if preview_image.size != (source_width * 2 + 24, source_height):
+                    raise AssertionError(f"Customized {preview_key} has the wrong comparison geometry: {preview_image.size}")
+        custom_export_paths = {
+            str(record.get("relativePath") or "").replace("\\", "/")
+            for record in custom_export.get("artifacts", [])
+        }
+        if not any("/01_original_unmodified/" in f"/{path}" for path in custom_export_paths) or not any(
+            "/02_customized_display/" in f"/{path}" for path in custom_export_paths
+        ):
+            raise AssertionError(f"Custom Region export omitted original or customized artifacts: {custom_export_paths}")
+        for comparison_key in ("comparisonPreviewPath", "originalComparisonPreviewPath"):
+            primary_png = Path(custom_export[comparison_key])
+            for suffix in (".png", ".tiff", ".json"):
+                required = primary_png.with_suffix(suffix)
+                if not required.is_file():
+                    raise AssertionError(f"Custom Region export omitted {required.name}")
+            _assert_png_backed_svg(primary_png, primary_png.with_suffix(".svg"))
+        if any(Path(path).suffix.lower() == ".ai" for path in custom_export_paths):
+            raise AssertionError("Windows Region export claimed an unsupported Adobe Illustrator artifact.")
+        if json.loads(workflow_state_path.read_text(encoding="utf-8")) != manual_saved_state:
+            raise AssertionError("Custom Region export changed persisted workflow state.")
 
         distribution_payload = {
             "boundaryLabel": region["boundaries"][0]["label"],
@@ -429,6 +822,91 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
                     "minCells": 0,
                 },
             ),
+            ("region", {**region_payload, "closeUm": 80.01}),
+            ("region", {**region_payload, "dilateUm": 80.01}),
+            ("region", {**region_payload, "contourDownsample": 3}),
+            (
+                "region_preview",
+                {
+                    "selectedBoundaryLabels": ["Unavailable boundary"],
+                    "selectedCellTypes": resolved_types[:1],
+                },
+            ),
+            (
+                "region_preview",
+                {
+                    "selectedBoundaryIds": [region["regions"][0]["id"]],
+                    "selectedCellTypes": resolved_types[:1],
+                    "lineStyle": "not-a-line-style",
+                },
+            ),
+            (
+                "region_preview",
+                {
+                    "selectedBoundaryIds": [region["regions"][0]["id"]],
+                    "selectedCellTypes": resolved_types[:1],
+                    "lineWidth": 10.01,
+                },
+            ),
+            (
+                "region_preview",
+                {
+                    "selectedBoundaryIds": [region["regions"][0]["id"]],
+                    "selectedCellTypes": resolved_types[:1],
+                    "lineWidth": 0.49,
+                },
+            ),
+            (
+                "region_preview",
+                {
+                    "selectedBoundaryIds": [manual_region_id],
+                    "selectedCellTypes": [manual_secondary_type],
+                    "boundaryCellTypeMode": "hybrid",
+                },
+            ),
+            (
+                "region_manual_preview",
+                {
+                    **manual_create_payload,
+                    "polygons": [[{"x": 0, "y": 0}, {"x": 1, "y": 1}]],
+                },
+            ),
+            (
+                "region_manual_preview",
+                {
+                    **manual_create_payload,
+                    "mode": "include",
+                },
+            ),
+            (
+                "region_manual_preview",
+                {
+                    **manual_create_payload,
+                    "targetBoundaryLabel": manual_region_label,
+                },
+            ),
+            (
+                "region_manual_save",
+                {
+                    **manual_create_payload,
+                    "displayName": "",
+                },
+            ),
+            (
+                "region_custom_export",
+                {
+                    "selectedBoundaryIds": ["roi_0000000000000000"],
+                    "selectedCellTypes": resolved_types[:1],
+                },
+            ),
+            (
+                "region_custom_export",
+                {
+                    "selectedBoundaryIds": [manual_region_id],
+                    "selectedCellTypes": [manual_secondary_type],
+                    "boundaryCellTypeMode": "source",
+                },
+            ),
         )
         for command, invalid_payload in invalid_requests:
             try:
@@ -514,6 +992,35 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
                     "Downstream analysis settings were not restored exactly: "
                     f"{restored.get('analysisParameters')}"
                 )
+            if restored.get("regionParameters") != expected_region_parameters:
+                raise AssertionError(f"Restore did not expose all applied Region parameters: {restored}")
+            if (int(restored.get("width", 0)), int(restored.get("height", 0))) != (
+                source_width,
+                source_height,
+            ):
+                raise AssertionError(f"Restore did not expose the source image dimensions: {restored}")
+            for preview_key in ("regionOverlay", "regionMask"):
+                restored_preview_path = Path(str(restored.get("previewPaths", {}).get(preview_key) or ""))
+                if not restored_preview_path.is_file():
+                    raise AssertionError(f"Restore omitted {preview_key}: {restored.get('previewPaths')}")
+                with Image.open(restored_preview_path) as restored_preview_image:
+                    if restored_preview_image.size != (source_width, source_height):
+                        raise AssertionError(
+                            f"Restored {preview_key} changed the source panel dimensions: {restored_preview_image.size}"
+                        )
+            restored_region_ids = {str(row.get("id")) for row in restored.get("regions", [])}
+            if not base_region_ids.issubset(restored_region_ids) or manual_region_id not in restored_region_ids:
+                raise AssertionError(f"Restore lost stable computational or manual Region ids: {restored_region_ids}")
+            restored_manual_row = next(
+                (row for row in restored.get("regions", []) if str(row.get("id")) == manual_region_id),
+                None,
+            )
+            if restored_manual_row is None or restored_manual_row.get("sourceType") != "manual":
+                raise AssertionError(f"Restore lost manual Region metadata: {restored_manual_row}")
+            if any(set(row) != expected_region_row_keys for row in restored.get("regions", [])):
+                raise AssertionError(f"Restore returned an inconsistent Region row schema: {restored.get('regions')}")
+            if not isinstance(restored.get("dominantCounts"), list):
+                raise AssertionError("Restore did not return dominant Region counts.")
             if len(restored.get("files", [])) < 12:
                 raise AssertionError("Restored output manifest is unexpectedly small.")
             restored_distance = restored_engine.request(
@@ -530,6 +1037,90 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
 
         with tempfile.TemporaryDirectory(prefix="spatialscope-history-guards-") as guard_value:
             guard_root = Path(guard_value)
+
+            zero_region_output = guard_root / "zero-region-run"
+            shutil.copytree(output_folder, zero_region_output)
+            zero_region_engine = EngineProcess(engine_command)
+            try:
+                zero_restore = zero_region_engine.request("restore", {"outputFolder": str(zero_region_output)})
+                if not zero_restore.get("workflow", {}).get("region"):
+                    raise AssertionError("Zero-Region guard could not restore the completed source history.")
+                try:
+                    zero_region_engine.request(
+                        "region",
+                        {
+                            "selectedTypes": [resolved_types[0]],
+                            "closeUm": 0.0,
+                            "dilateUm": 0.0,
+                            "minAreaUm2": 0.0,
+                            "minCells": 1_000_000,
+                        },
+                    )
+                except RuntimeError as error:
+                    if "produced no nonempty boundary" not in str(error):
+                        raise AssertionError(f"Empty Region run failed for the wrong reason: {error}") from error
+                else:
+                    raise AssertionError("A Region run with zero nonempty boundaries reported success.")
+                zero_state = json.loads(
+                    (zero_region_output / "00_config" / "windows_session_state.json").read_text(encoding="utf-8")
+                )
+                expected_after_zero_region = {"inputs", "overlay", "nuclei", "cellTypes", "neighborhood"}
+                if any(
+                    bool(value) != (stage in expected_after_zero_region)
+                    for stage, value in zero_state["stages"].items()
+                ):
+                    raise AssertionError(f"Empty Region run unlocked downstream workflow: {zero_state['stages']}")
+                if set(zero_state.get("analysisParameters", {})) != {"neighborhood"}:
+                    raise AssertionError("Empty Region run retained invalid Region or downstream parameters.")
+            finally:
+                zero_region_engine.close()
+            zero_region_restore_engine = EngineProcess(engine_command)
+            try:
+                zero_region_restored = zero_region_restore_engine.request(
+                    "restore",
+                    {"outputFolder": str(zero_region_output)},
+                )
+                if zero_region_restored.get("workflow", {}).get("region") or zero_region_restored.get("boundaries"):
+                    raise AssertionError("Restart exposed Region results after a zero-boundary run.")
+            finally:
+                zero_region_restore_engine.close()
+
+            empty_boundary_output = guard_root / "empty-boundary-filter"
+            shutil.copytree(output_folder, empty_boundary_output)
+            empty_boundary_dir = empty_boundary_output / "07_region_analysis"
+            empty_boundary_path = empty_boundary_dir / "empty_smoke_region_mask_uint8.tiff"
+            Image.new("L", (source_width, source_height), 0).save(empty_boundary_path, format="TIFF")
+            empty_registry_path = empty_boundary_dir / "boundary_mask_registry.json"
+            empty_registry = json.loads(empty_registry_path.read_text(encoding="utf-8"))
+            empty_registry.setdefault("entries", []).append(
+                {
+                    "mask_path": empty_boundary_path.name,
+                    "display_name": "Empty smoke boundary",
+                    "source": "manual_roi_selection",
+                    "group_name": "empty-smoke",
+                    "mask_key": "empty-smoke",
+                }
+            )
+            empty_registry_path.write_text(json.dumps(empty_registry, indent=2) + "\n", encoding="utf-8")
+            empty_boundary_engine = EngineProcess(engine_command)
+            try:
+                empty_boundary_restore = empty_boundary_engine.request(
+                    "restore",
+                    {"outputFolder": str(empty_boundary_output)},
+                )
+                if any(
+                    str(row.get("label")) == "Empty smoke boundary"
+                    for row in empty_boundary_restore.get("regions", [])
+                ):
+                    raise AssertionError("Restore exposed an empty Region boundary.")
+                if not any("empty Region boundary mask" in str(message) for message in empty_boundary_restore.get("warnings", [])):
+                    raise AssertionError(
+                        f"Restore filtered an empty Region boundary without a warning: {empty_boundary_restore.get('warnings')}"
+                    )
+                if not empty_boundary_restore.get("workflow", {}).get("region"):
+                    raise AssertionError("An ignored empty Region boundary invalidated otherwise valid Region results.")
+            finally:
+                empty_boundary_engine.close()
 
             legacy_parameters_output = guard_root / "legacy-analysis-parameters"
             shutil.copytree(output_folder, legacy_parameters_output)
@@ -558,24 +1149,37 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
             invalid_parameters_output = guard_root / "invalid-analysis-parameters"
             shutil.copytree(output_folder, invalid_parameters_output)
             invalid_state_path = invalid_parameters_output / "00_config" / "windows_session_state.json"
-            invalid_state = json.loads(invalid_state_path.read_text(encoding="utf-8"))
-            invalid_state["analysisParameters"]["region"]["selectedTypes"] = ["Unavailable cell type"]
-            invalid_state_path.write_text(json.dumps(invalid_state, indent=2) + "\n", encoding="utf-8")
-            invalid_parameters_engine = EngineProcess(engine_command)
-            try:
-                invalid_restore = invalid_parameters_engine.request(
-                    "restore",
-                    {"outputFolder": str(invalid_parameters_output)},
-                )
-                invalid_analysis = invalid_restore.get("analysisParameters", {})
-                if "region" in invalid_analysis:
-                    raise AssertionError("Restore accepted unavailable region cell types from session state.")
-                if invalid_analysis.get("neighborhood") != expected_neighborhood_parameters:
-                    raise AssertionError("One invalid analysis entry discarded an unrelated valid entry.")
-                if not any("region analysis parameters were ignored" in str(value) for value in invalid_restore.get("warnings", [])):
-                    raise AssertionError("Restore did not report the rejected region analysis settings.")
-            finally:
-                invalid_parameters_engine.close()
+            valid_state = json.loads(invalid_state_path.read_text(encoding="utf-8"))
+            invalid_region_cases = (
+                ("unavailable cell type", {"selectedTypes": ["Unavailable cell type"]}),
+                ("closing radius above 80", {"closeUm": 80.01}),
+                ("dilation radius above 80", {"dilateUm": 80.01}),
+                ("unsupported contour downsample", {"contourDownsample": 3}),
+                ("line width above 10", {"lineWidth": 10.01}),
+                ("line width below 0.5", {"lineWidth": 0.49}),
+            )
+            for case_name, invalid_values in invalid_region_cases:
+                invalid_state = json.loads(json.dumps(valid_state))
+                invalid_state["analysisParameters"]["region"].update(invalid_values)
+                invalid_state_path.write_text(json.dumps(invalid_state, indent=2) + "\n", encoding="utf-8")
+                invalid_parameters_engine = EngineProcess(engine_command)
+                try:
+                    invalid_restore = invalid_parameters_engine.request(
+                        "restore",
+                        {"outputFolder": str(invalid_parameters_output)},
+                    )
+                    invalid_analysis = invalid_restore.get("analysisParameters", {})
+                    if "region" in invalid_analysis:
+                        raise AssertionError(f"Restore accepted invalid Region settings: {case_name}.")
+                    if invalid_analysis.get("neighborhood") != expected_neighborhood_parameters:
+                        raise AssertionError("One invalid analysis entry discarded an unrelated valid entry.")
+                    if not any(
+                        "region analysis parameters were ignored" in str(value)
+                        for value in invalid_restore.get("warnings", [])
+                    ):
+                        raise AssertionError(f"Restore did not report rejected Region settings: {case_name}.")
+                finally:
+                    invalid_parameters_engine.close()
 
             changed_definition_output = guard_root / "changed-definition"
             shutil.copytree(output_folder, changed_definition_output)
@@ -853,7 +1457,8 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
             "resolved_cell_types": resolved_types,
             "neighborhood_clusters": neighborhood["summary"]["clusterCount"],
             "optimizer_checks": 5,
-            "restore_checks": 9,
+            "region_protocol_checks": 12,
+            "restore_checks": 15,
             "apply_checks": 2,
             "output_guard_checks": 2,
             "output_files": len(outputs["files"]),

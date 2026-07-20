@@ -1,6 +1,6 @@
 # SpatialScope for Windows
 
-SpatialScope 1.2.2 is a native Windows desktop application. Its interface is WPF/.NET, its analysis engine runs as a private local process, and it does not use Streamlit or a browser.
+SpatialScope 1.2.3 is a native Windows desktop application. Its interface is WPF/.NET, its analysis engine runs as a private local process, and it does not use Streamlit or a browser.
 
 ## Architecture
 
@@ -13,7 +13,7 @@ SpatialScope 1.2.2 is a native Windows desktop application. Its interface is WPF
 - `run_native.ps1` prepares and runs the source application for local development.
 - `build_native.ps1` produces the self-contained Windows setup program.
 
-The previous Electron/Streamlit implementation remains in `desktop/` and `backend/app.py` for compatibility and reference only. It is not used by the native 1.2.2 installer.
+The previous Electron/Streamlit implementation remains in `desktop/` and `backend/app.py` for compatibility and reference only. It is not used by the native 1.2.3 installer.
 
 ## Test and adjust locally
 
@@ -74,4 +74,4 @@ Once dependencies are already installed, add `-SkipDependencies` to save time. T
 
 Run the setup program and launch SpatialScope from the Start menu or desktop shortcut. Python, PyOpenCL, Node.js, Electron, Streamlit, and the .NET SDK are not required on the test machine; the private engine and OpenCL binding are bundled. A compatible graphics driver is still required for GPU execution. The installer is currently unsigned, so Windows SmartScreen may require **More info > Run anyway** the first time.
 
-The native 1.2.2 build explicitly bundles and smoke-tests `matplotlib.backends.backend_svg`, which Step 2 uses when it saves SVG files.
+The native 1.2.3 build explicitly bundles and smoke-tests `matplotlib.backends.backend_svg`, which Step 2 uses when it saves SVG files.

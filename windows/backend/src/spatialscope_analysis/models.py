@@ -89,7 +89,7 @@ class RegionParams:
     min_cells: int = 5
     contour_downsample: int = 2
     line_width: float = 2.0
-    line_style: str = "--"
+    line_style: str = "-"
     boundary_color: str = "#a1d99b"
     use_type_colors: bool = False
 

@@ -1,4 +1,5 @@
 using Microsoft.Win32;
+using SpatialScope.Windows.Controls;
 using SpatialScope.Windows.Models;
 using SpatialScope.Windows.Services;
 using System.ComponentModel;
@@ -41,6 +42,39 @@ public partial class MainWindow : Window
         "#F78C6B", "#4CC9F0", "#B8DE6F", "#FF70A6", "#70D6FF", "#C77DFF",
     ];
 
+    private static readonly IReadOnlyDictionary<string, string[]> WorkflowPreviewKeys =
+        new Dictionary<string, string[]>(StringComparer.Ordinal)
+        {
+            ["overlay"] = ["overlay", "split"],
+            ["nuclei"] = ["nucleiOptimizer", "nuclei"],
+            ["cellTypes"] = ["assignmentOptimizer", "cellTypes"],
+            ["neighborhood"] = ["neighborhood"],
+            ["region"] =
+            [
+                "region",
+                "regionOverlay",
+                "regionMask",
+                "regionOriginal",
+                "regionOriginalOverlay",
+                "regionOriginalMask",
+                "regionMap",
+                "regionMapOverlay",
+                "regionMapMask",
+                "regionCustomized",
+                "regionCustomizedOverlay",
+                "regionCustomizedMask",
+                "regionManualEditor",
+                "regionManualAdjusted",
+            ],
+            ["distribution"] =
+            [
+                "distribution",
+                "distributionBandMap",
+                "distributionDensity",
+            ],
+            ["distance"] = ["distance_nearest", "distance_boundary"],
+        };
+
     private readonly LocalizationService _localization = new();
     private readonly EngineClient _engine = new();
     private readonly ObservableCollection<WorkflowSection> _sections = [];
@@ -75,6 +109,36 @@ public partial class MainWindow : Window
     private double _regionDilationRadius = 10;
     private double _regionMinimumArea = 20000;
     private double _regionMinimumCells = 5;
+    private double _regionContourDownsample = 2;
+    private double _regionLineWidth = 2;
+    private string _regionLineStyle = "-";
+    private string _regionBoundaryColor = "#A1D99B";
+    private bool _regionUseTypeColors;
+    private int _regionSourceWidth;
+    private int _regionSourceHeight;
+    private readonly ObservableCollection<RegionSummaryRow> _regionRows = [];
+    private readonly ObservableCollection<RegionDominantCountRow> _regionDominantCounts = [];
+    private readonly List<string> _regionDisplayedBoundaries = [];
+    private readonly List<string> _regionDisplayedCellTypes = [];
+    private readonly List<string> _regionCustomizedBoundaries = [];
+    private readonly List<string> _regionCustomizedCellTypes = [];
+    private readonly List<string> _regionManualVisibleBoundaries = [];
+    private readonly List<string> _regionManualSeedCellTypes = [];
+    private string _regionManualMode = "create";
+    private string? _regionManualTargetBoundary;
+    private string _regionManualDisplayName = "manual_drawn_ROI";
+    private RegionDrawingMode _regionManualDrawingMode = RegionDrawingMode.Polygon;
+    private List<List<Point>> _regionManualPolygons = [];
+    private double _regionManualClosingRadius = 2;
+    private double _regionManualDilationRadius;
+    private double _regionManualMinimumArea;
+    private double _regionManualMinimumCells = 1;
+    private double _regionManualContourDownsample = 1;
+    private readonly Dictionary<string, int> _regionPreviewGenerations = [];
+    private int? _regionMapRenderedBoundaryCount;
+    private int? _regionMapRenderedCellTypeCount;
+    private int? _regionMapRenderedCellCount;
+    private int _regionManualPreviewGeneration;
     private string? _distributionBoundaryLabel;
     private readonly List<string> _distributionSelectedCellTypes = [];
     private bool _distributionSelectionInitialized;
@@ -207,7 +271,25 @@ public partial class MainWindow : Window
             await SaveConfigurationAsync();
         }
 
+        var qaSection = Environment.GetEnvironmentVariable("SPATIALSCOPE_QA_SECTION")?.Trim();
+        if (!string.IsNullOrWhiteSpace(qaSection)
+            && _sections.Any(section => string.Equals(section.Key, qaSection, StringComparison.Ordinal)))
+        {
+            SelectSection(qaSection);
+        }
+
         await Dispatcher.InvokeAsync(() => UpdateLayout(), DispatcherPriority.ApplicationIdle);
+        if (DetailHost.Content is ScrollViewer detailScroll
+            && double.TryParse(
+                Environment.GetEnvironmentVariable("SPATIALSCOPE_QA_SCROLL_OFFSET"),
+                NumberStyles.Float,
+                CultureInfo.InvariantCulture,
+                out var scrollOffset)
+            && scrollOffset > 0)
+        {
+            detailScroll.ScrollToVerticalOffset(scrollOffset);
+            await Dispatcher.InvokeAsync(() => UpdateLayout(), DispatcherPriority.ApplicationIdle);
+        }
         await Task.Delay(300);
         CaptureWindowPng(Path.GetFullPath(capturePath));
         if (string.Equals(
@@ -859,6 +941,18 @@ public partial class MainWindow : Window
             if (!response.TryGetProperty("restored", out var restored) || !restored.GetBoolean()) return false;
             ValidateRestoredHistory(response);
             ApplyRestoredHistory(response, selectedFolder);
+            try
+            {
+                await RefreshExactRegionPreviewsAsync(useWorkflowStatus: false);
+            }
+            catch (Exception previewException)
+            {
+                SetStatus(
+                    $"{_localization["ExistingResultsRestored"]} "
+                    + $"{_localization["RegionPreviewRefreshFailed"]}: "
+                    + LocalizeEngineError(previewException.Message));
+            }
+            RefreshSectionViewIfSelected("region");
             return true;
         }
         catch (Exception exception)
@@ -999,16 +1093,11 @@ public partial class MainWindow : Window
         _resolvedCellTypes.Clear();
         if (response.TryGetProperty("resolvedCellTypes", out var resolvedCellTypes))
             _resolvedCellTypes.AddRange(resolvedCellTypes.EnumerateArray().Select(item => item.GetString() ?? string.Empty).Where(item => item.Length > 0));
-        _boundaries.Clear();
-        if (response.TryGetProperty("boundaries", out var boundaries))
-        {
-            foreach (var item in boundaries.EnumerateArray())
-                _boundaries.Add((item.GetProperty("label").GetString() ?? string.Empty, item.GetProperty("path").GetString() ?? string.Empty));
-        }
 
         var hasAnalysisParameters = response.TryGetProperty("analysisParameters", out var analysisParameters)
             && analysisParameters.ValueKind == JsonValueKind.Object;
         if (hasAnalysisParameters) ApplyRestoredAnalysisParameters(analysisParameters);
+        ApplyRegionResultPayload(response, replaceBoundaries: true);
 
         _outputFiles.Clear();
         if (response.TryGetProperty("files", out var files))
@@ -1065,17 +1154,21 @@ public partial class MainWindow : Window
 
         if (downstreamHistoryDowngraded)
         {
-            var previewSteps = new Dictionary<string, int>
+            foreach (var section in _sections.Where(section => section.Number >= firstMissingDownstreamStep))
+                RemoveWorkflowPreviews(section.Key);
+            if (firstMissingDownstreamStep <= 6)
             {
-                ["neighborhood"] = 5,
-                ["region"] = 6,
-                ["distribution"] = 7,
-                ["distance_nearest"] = 8,
-                ["distance_boundary"] = 8,
-            };
-            foreach (var key in previewSteps.Where(item => item.Value >= firstMissingDownstreamStep).Select(item => item.Key))
-                _previewPaths.Remove(key);
-            if (firstMissingDownstreamStep <= 6) _boundaries.Clear();
+                _boundaries.Clear();
+                _regionRows.Clear();
+                _regionDominantCounts.Clear();
+                _regionDisplayedBoundaries.Clear();
+                _regionDisplayedCellTypes.Clear();
+                _regionCustomizedBoundaries.Clear();
+                _regionCustomizedCellTypes.Clear();
+                _regionManualVisibleBoundaries.Clear();
+                _regionManualSeedCellTypes.Clear();
+                _regionManualPolygons = [];
+            }
             _outputFiles.Clear();
         }
 
@@ -1115,14 +1208,25 @@ public partial class MainWindow : Window
                 _regionSelectedCellTypes.AddRange(selectedTypes);
                 _regionSelectionInitialized = true;
             }
-            if (TryGetJsonNumber(region, "closeUm", out var closeUm) && closeUm >= 0)
-                _regionClosingRadius = closeUm;
-            if (TryGetJsonNumber(region, "dilateUm", out var dilateUm) && dilateUm >= 0)
-                _regionDilationRadius = dilateUm;
-            if (TryGetJsonNumber(region, "minAreaUm2", out var minAreaUm2) && minAreaUm2 >= 0)
-                _regionMinimumArea = minAreaUm2;
-            if (TryGetJsonNumber(region, "minCells", out var minCells) && minCells >= 0)
-                _regionMinimumCells = minCells;
+            if (TryGetJsonNumber(region, "closeUm", out var closeUm) && double.IsFinite(closeUm))
+                _regionClosingRadius = Math.Clamp(closeUm, 0, 80);
+            if (TryGetJsonNumber(region, "dilateUm", out var dilateUm) && double.IsFinite(dilateUm))
+                _regionDilationRadius = Math.Clamp(dilateUm, 0, 80);
+            if (TryGetJsonNumber(region, "minAreaUm2", out var minAreaUm2) && double.IsFinite(minAreaUm2))
+                _regionMinimumArea = Math.Clamp(minAreaUm2, 0, 1_000_000_000);
+            if (TryGetJsonNumber(region, "minCells", out var minCells) && double.IsFinite(minCells))
+                _regionMinimumCells = Math.Round(Math.Clamp(minCells, 1, 1_000_000));
+            if (TryGetJsonNumber(region, "contourDownsample", out var contourDownsample))
+                _regionContourDownsample = NormalizeRegionContourDownsample(contourDownsample);
+            if (TryGetJsonNumber(region, "lineWidth", out var lineWidth) && double.IsFinite(lineWidth))
+                _regionLineWidth = Math.Clamp(lineWidth, 0.5, 10);
+            if (TryGetJsonString(region, "lineStyle", out var lineStyle))
+                _regionLineStyle = lineStyle is "-" or "--" or "-." or ":" ? lineStyle : "-";
+            if (TryGetJsonString(region, "boundaryColor", out var boundaryColor))
+                _regionBoundaryColor = boundaryColor;
+            if (region.TryGetProperty("useTypeColors", out var useTypeColors)
+                && useTypeColors.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                _regionUseTypeColors = useTypeColors.GetBoolean();
         }
 
         if (analysisParameters.TryGetProperty("distribution", out var distribution)
@@ -1210,6 +1314,36 @@ public partial class MainWindow : Window
         _regionDilationRadius = 10;
         _regionMinimumArea = 20000;
         _regionMinimumCells = 5;
+        _regionContourDownsample = 2;
+        _regionLineWidth = 2;
+        _regionLineStyle = "-";
+        _regionBoundaryColor = "#A1D99B";
+        _regionUseTypeColors = false;
+        _regionSourceWidth = 0;
+        _regionSourceHeight = 0;
+        _regionRows.Clear();
+        _regionDominantCounts.Clear();
+        _regionDisplayedBoundaries.Clear();
+        _regionDisplayedCellTypes.Clear();
+        _regionCustomizedBoundaries.Clear();
+        _regionCustomizedCellTypes.Clear();
+        _regionManualVisibleBoundaries.Clear();
+        _regionManualSeedCellTypes.Clear();
+        _regionManualMode = "create";
+        _regionManualTargetBoundary = null;
+        _regionManualDisplayName = "manual_drawn_ROI";
+        _regionManualDrawingMode = RegionDrawingMode.Polygon;
+        _regionManualPolygons = [];
+        _regionManualClosingRadius = 2;
+        _regionManualDilationRadius = 0;
+        _regionManualMinimumArea = 0;
+        _regionManualMinimumCells = 1;
+        _regionManualContourDownsample = 1;
+        _regionPreviewGenerations.Clear();
+        _regionMapRenderedBoundaryCount = null;
+        _regionMapRenderedCellTypeCount = null;
+        _regionMapRenderedCellCount = null;
+        ++_regionManualPreviewGeneration;
         _distributionBoundaryLabel = null;
         _distributionSelectedCellTypes.Clear();
         _distributionSelectionInitialized = false;
@@ -1338,8 +1472,12 @@ public partial class MainWindow : Window
             {
                 Source = LoadBoundedBitmap(previewPath, 3000),
                 Stretch = Stretch.Uniform,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
+                // Fill the viewport's layout slot and let Stretch.Uniform fit the
+                // entire bitmap inside it. Center alignment lets WPF retain the
+                // bitmap's natural desired size, so wide/square scientific images
+                // can be clipped by a narrower app window before zoom is applied.
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalAlignment = VerticalAlignment.Stretch,
                 RenderTransform = imageTransform,
                 RenderTransformOrigin = new Point(0, 0),
             };
@@ -1424,6 +1562,12 @@ public partial class MainWindow : Window
 
             viewport.PreviewMouseWheel += (_, e) =>
             {
+                // The plot sits inside a vertically scrolling workflow page. A
+                // plain wheel gesture must keep scrolling that page; otherwise
+                // users accidentally zoom the plot while trying to reach it and
+                // are left seeing only part of the scientific field. Ctrl+wheel
+                // is the deliberate zoom gesture, alongside +/- keyboard zoom.
+                if (!Keyboard.Modifiers.HasFlag(ModifierKeys.Control)) return;
                 var oldScale = imageTransform.Matrix.M11;
                 ZoomAt(e.GetPosition(viewport), e.Delta > 0 ? 1.18 : 1 / 1.18);
                 e.Handled = !AreClose(oldScale, imageTransform.Matrix.M11);
@@ -2215,191 +2359,7 @@ public partial class MainWindow : Window
                 previewKey: "neighborhood")));
     }
 
-    private UIElement BuildRegionView()
-    {
-        if (_resolvedCellTypes.Count > 0)
-            _regionSelectedCellTypes.RemoveAll(item => !_resolvedCellTypes.Contains(item, StringComparer.Ordinal));
-        if (!_regionSelectionInitialized && _resolvedCellTypes.Count > 0)
-        {
-            if (_regionSelectedCellTypes.Count == 0) _regionSelectedCellTypes.Add(_resolvedCellTypes[0]);
-            _regionSelectionInitialized = true;
-        }
-        var typePicker = new ListBox
-        {
-            ItemsSource = _resolvedCellTypes,
-            SelectionMode = SelectionMode.Multiple,
-            MinHeight = 110,
-        };
-        AutomationProperties.SetName(typePicker, _localization["SelectedCellTypes"]);
-        AutomationProperties.SetHelpText(typePicker, _localization["SelectCellTypeHelp"]);
-        foreach (var item in _regionSelectedCellTypes) typePicker.SelectedItems.Add(item);
-        var parameters = new UniformGrid { Columns = 2 };
-        parameters.Children.Add(CreateNumberField(_localization["ClosingRadius"], _regionClosingRadius, value => _regionClosingRadius = value, "µm", "region", minimum: 0));
-        parameters.Children.Add(CreateNumberField(_localization["DilationRadius"], _regionDilationRadius, value => _regionDilationRadius = value, "µm", "region", minimum: 0));
-        parameters.Children.Add(CreateNumberField(_localization["MinimumArea"], _regionMinimumArea, value => _regionMinimumArea = value, "µm²", "region", minimum: 0));
-        parameters.Children.Add(CreateNumberField(
-            _localization["MinimumCells"],
-            _regionMinimumCells,
-            value => _regionMinimumCells = value,
-            "",
-            "region",
-            normalize: value => Math.Max(1, Math.Round(value)),
-            minimum: 1));
-        var stack = new StackPanel();
-        var hasCellTypes = _resolvedCellTypes.Count > 0;
-        var workflowReady = _sections.First(section => section.Key == "region").Status != WorkflowStatus.NotStarted;
-        if (!workflowReady) stack.Children.Add(CreateInlineNotice(_localization["CompletePreviousSteps"], warning: true));
-        else if (!hasCellTypes) stack.Children.Add(CreateInlineNotice(_localization["PrerequisiteCellTypes"], warning: true));
-        stack.Children.Add(CreateFieldLabel(_localization["SelectedCellTypes"], new Thickness(0, 0, 0, 6)));
-        stack.Children.Add(typePicker);
-        parameters.Margin = new Thickness(0, 16, 0, 0);
-        stack.Children.Add(parameters);
-        var run = CreateButton(_localization["RunRegion"], async (_, _) =>
-        {
-            var result = await RunWorkflowAsync("region", "region", new
-            {
-                selectedTypes = _regionSelectedCellTypes.ToArray(),
-                closeUm = _regionClosingRadius,
-                dilateUm = _regionDilationRadius,
-                minAreaUm2 = _regionMinimumArea,
-                minCells = (int)Math.Round(_regionMinimumCells),
-            });
-            if (result is null) return;
-            _boundaries.Clear();
-            foreach (var item in result.Value.GetProperty("boundaries").EnumerateArray())
-                _boundaries.Add((item.GetProperty("label").GetString() ?? string.Empty, item.GetProperty("path").GetString() ?? string.Empty));
-            _previewPaths["region"] = result.Value.TryGetProperty("previewPath", out var preview) && preview.ValueKind == JsonValueKind.String ? preview.GetString() ?? string.Empty : string.Empty;
-            CaptureExportPaths(result.Value);
-            RefreshSectionViewIfSelected("region");
-        }, primary: true);
-        run.Margin = new Thickness(0, 14, 0, 0);
-        void RefreshRunAvailability() => SetActionAvailability(
-            run,
-            workflowReady && hasCellTypes && _regionSelectedCellTypes.Count > 0,
-            !workflowReady
-                ? _localization["CompletePreviousSteps"]
-                : !hasCellTypes ? _localization["PrerequisiteCellTypes"] : _localization["SelectCellTypeHelp"]);
-        RefreshRunAvailability();
-        typePicker.SelectionChanged += (_, _) =>
-        {
-            var selected = typePicker.SelectedItems.Cast<string>().ToArray();
-            if (_regionSelectedCellTypes.SequenceEqual(selected, StringComparer.Ordinal)) return;
-            _regionSelectionInitialized = true;
-            _regionSelectedCellTypes.Clear();
-            _regionSelectedCellTypes.AddRange(selected);
-            InvalidateAfter("region");
-            RefreshRunAvailability();
-        };
-        stack.Children.Add(run);
-        return CreatePage(
-            CreateCard(_localization["AnalysisSettings"], stack),
-            CreateCard(_localization["Preview"], CreateImagePanel(
-                _localization["RegionTitle"],
-                _previewPaths.GetValueOrDefault("region"),
-                emptyDetail: hasCellTypes ? _localization["RunAnalysisForPreview"] : _localization["PrerequisiteCellTypes"],
-                previewKey: "region")));
-    }
-
-    private UIElement BuildDistributionView()
-    {
-        var boundaryOptions = _boundaries.Select(item => item.Label).ToArray();
-        if (boundaryOptions.Length > 0
-            && (_distributionBoundaryLabel is null || !boundaryOptions.Contains(_distributionBoundaryLabel, StringComparer.Ordinal)))
-            _distributionBoundaryLabel = boundaryOptions.FirstOrDefault();
-        if (_resolvedCellTypes.Count > 0)
-            _distributionSelectedCellTypes.RemoveAll(item => !_resolvedCellTypes.Contains(item, StringComparer.Ordinal));
-        if (!_distributionSelectionInitialized && _resolvedCellTypes.Count > 0)
-        {
-            if (_distributionSelectedCellTypes.Count == 0) _distributionSelectedCellTypes.AddRange(_resolvedCellTypes);
-            _distributionSelectionInitialized = true;
-        }
-        var boundary = new ComboBox
-        {
-            ItemsSource = boundaryOptions,
-            SelectedItem = _distributionBoundaryLabel,
-            Width = 360,
-            HorizontalAlignment = HorizontalAlignment.Left,
-        };
-        AutomationProperties.SetName(boundary, _localization["Boundary"]);
-        var typePicker = new ListBox
-        {
-            ItemsSource = _resolvedCellTypes,
-            SelectionMode = SelectionMode.Multiple,
-            MinHeight = 110,
-        };
-        AutomationProperties.SetName(typePicker, _localization["DistributionCellTypes"]);
-        AutomationProperties.SetHelpText(typePicker, _localization["SelectCellTypeHelp"]);
-        foreach (var item in _distributionSelectedCellTypes) typePicker.SelectedItems.Add(item);
-        var stack = new StackPanel();
-        var hasBoundaries = boundaryOptions.Length > 0;
-        var hasCellTypes = _resolvedCellTypes.Count > 0;
-        var workflowReady = _sections.First(section => section.Key == "distribution").Status != WorkflowStatus.NotStarted;
-        if (!workflowReady) stack.Children.Add(CreateInlineNotice(_localization["CompletePreviousSteps"], warning: true));
-        else
-        {
-            if (!hasBoundaries) stack.Children.Add(CreateInlineNotice(_localization["PrerequisiteRegion"], warning: true));
-            if (!hasCellTypes) stack.Children.Add(CreateInlineNotice(_localization["PrerequisiteCellTypes"], warning: true));
-        }
-        stack.Children.Add(CreateFieldLabel(_localization["Boundary"], new Thickness(0, 0, 0, 6)));
-        stack.Children.Add(boundary);
-        stack.Children.Add(CreateFieldLabel(_localization["DistributionCellTypes"], new Thickness(0, 16, 0, 6)));
-        stack.Children.Add(typePicker);
-        var bandWidthField = CreateNumberField(
-            _localization["BandWidth"],
-            _distributionBandWidth,
-            value => _distributionBandWidth = value,
-            "µm",
-            "distribution");
-        if (bandWidthField is FrameworkElement bandWidthElement) bandWidthElement.Margin = new Thickness(0, 16, 14, 0);
-        stack.Children.Add(bandWidthField);
-        var run = CreateButton(_localization["RunDistribution"], async (_, _) =>
-        {
-            var result = await RunWorkflowAsync("distribution", "cell_distribution", new
-            {
-                boundaryLabel = _distributionBoundaryLabel,
-                bandWidthUm = _distributionBandWidth,
-                selectedCellTypes = _distributionSelectedCellTypes.ToArray(),
-            });
-            if (result is null) return;
-            _previewPaths["distribution"] = result.Value.TryGetProperty("previewPath", out var preview) && preview.ValueKind == JsonValueKind.String ? preview.GetString() ?? string.Empty : string.Empty;
-            CaptureExportPaths(result.Value);
-            RefreshSectionViewIfSelected("distribution");
-        }, primary: true);
-        run.Margin = new Thickness(0, 14, 0, 0);
-        void RefreshRunAvailability() => SetActionAvailability(
-            run,
-            workflowReady && hasBoundaries && hasCellTypes && _distributionSelectedCellTypes.Count > 0 && !string.IsNullOrWhiteSpace(_distributionBoundaryLabel),
-            !workflowReady
-                ? _localization["CompletePreviousSteps"]
-                : !hasBoundaries ? _localization["PrerequisiteRegion"] : _localization["SelectCellTypeHelp"]);
-        RefreshRunAvailability();
-        boundary.SelectionChanged += (_, _) =>
-        {
-            var selected = boundary.SelectedItem?.ToString();
-            if (string.Equals(selected, _distributionBoundaryLabel, StringComparison.Ordinal)) return;
-            _distributionBoundaryLabel = selected;
-            InvalidateAfter("distribution");
-            RefreshRunAvailability();
-        };
-        typePicker.SelectionChanged += (_, _) =>
-        {
-            var selected = typePicker.SelectedItems.Cast<string>().ToArray();
-            if (_distributionSelectedCellTypes.SequenceEqual(selected, StringComparer.Ordinal)) return;
-            _distributionSelectionInitialized = true;
-            _distributionSelectedCellTypes.Clear();
-            _distributionSelectedCellTypes.AddRange(selected);
-            InvalidateAfter("distribution");
-            RefreshRunAvailability();
-        };
-        stack.Children.Add(run);
-        return CreatePage(
-            CreateCard(_localization["AnalysisSettings"], stack),
-            CreateCard(_localization["Preview"], CreateImagePanel(
-                _localization["DistributionTitle"],
-                _previewPaths.GetValueOrDefault("distribution"),
-                emptyDetail: hasBoundaries ? _localization["RunAnalysisForPreview"] : _localization["PrerequisiteRegion"],
-                previewKey: "distribution")));
-    }
+    private UIElement BuildRegionView() => BuildRedesignedRegionView();
 
     private UIElement BuildDistanceView()
     {
@@ -2651,6 +2611,7 @@ public partial class MainWindow : Window
             return null;
         }
         var previousStatus = section.Status;
+        var refreshInvalidatedViewAfterFailure = false;
         SetInteractionBusy(true);
         if (completesSection) InvalidateAfter(sectionKey);
         _activeSectionKey = sectionKey;
@@ -2671,6 +2632,7 @@ public partial class MainWindow : Window
         catch (Exception exception)
         {
             section.Status = completesSection ? WorkflowStatus.Error : previousStatus;
+            refreshInvalidatedViewAfterFailure = completesSection;
             SetStatus(LocalizeEngineError(exception.Message), isError: true);
             UpdateHeader();
             return null;
@@ -2681,6 +2643,7 @@ public partial class MainWindow : Window
             _activeSectionKey = null;
             OperationProgress.Visibility = Visibility.Collapsed;
             UpdateProgressMetadata();
+            if (refreshInvalidatedViewAfterFailure) RefreshSectionViewIfSelected(sectionKey);
         }
     }
 
@@ -2691,49 +2654,66 @@ public partial class MainWindow : Window
             _sections[index + 1].Status = WorkflowStatus.Ready;
     }
 
+    private void RemoveWorkflowPreviews(string sectionKey)
+    {
+        if (!WorkflowPreviewKeys.TryGetValue(sectionKey, out var keys)) return;
+        foreach (var key in keys)
+        {
+            _previewPaths.Remove(key);
+            HideTaggedDetailElement($"preview:{key}");
+        }
+    }
+
     private void InvalidateAfter(string sectionKey)
     {
         if (sectionKey == "inputs") ++_outputRestoreGeneration;
         var index = _sections.ToList().FindIndex(section => section.Key == sectionKey);
         if (index < 0) return;
 
-        void RemovePreviews(params string[] keys)
-        {
-            foreach (var key in keys)
-            {
-                if (_previewPaths.Remove(key)) HideTaggedDetailElement($"preview:{key}");
-            }
-        }
-
         if (index <= _sections.ToList().FindIndex(section => section.Key == "overlay"))
         {
-            RemovePreviews("overlay", "split");
+            RemoveWorkflowPreviews("overlay");
             _exportPaths.Clear();
         }
         if (index <= _sections.ToList().FindIndex(section => section.Key == "nuclei"))
         {
-            RemovePreviews("nucleiOptimizer", "nuclei");
+            RemoveWorkflowPreviews("nuclei");
             _pendingNucleiRecommendation = null;
             HideTaggedDetailElement("recommendation:nuclei");
         }
         if (index <= _sections.ToList().FindIndex(section => section.Key == "cellTypes"))
         {
-            RemovePreviews("assignmentOptimizer", "cellTypes");
+            RemoveWorkflowPreviews("cellTypes");
             _pendingAssignmentRecommendation = null;
             HideTaggedDetailElement("recommendation:assignment");
             _resolvedCellTypes.Clear();
         }
         if (index <= _sections.ToList().FindIndex(section => section.Key == "neighborhood"))
-            RemovePreviews("neighborhood");
+            RemoveWorkflowPreviews("neighborhood");
         if (index <= _sections.ToList().FindIndex(section => section.Key == "region"))
         {
-            RemovePreviews("region");
+            RemoveWorkflowPreviews("region");
             _boundaries.Clear();
+            _regionRows.Clear();
+            _regionDominantCounts.Clear();
+            _regionDisplayedBoundaries.Clear();
+            _regionDisplayedCellTypes.Clear();
+            _regionCustomizedBoundaries.Clear();
+            _regionCustomizedCellTypes.Clear();
+            _regionManualVisibleBoundaries.Clear();
+            _regionManualSeedCellTypes.Clear();
+            _regionManualTargetBoundary = null;
+            _regionManualPolygons = [];
+            _regionPreviewGenerations.Clear();
+            _regionMapRenderedBoundaryCount = null;
+            _regionMapRenderedCellTypeCount = null;
+            _regionMapRenderedCellCount = null;
+            ++_regionManualPreviewGeneration;
         }
         if (index <= _sections.ToList().FindIndex(section => section.Key == "distribution"))
-            RemovePreviews("distribution");
+            RemoveWorkflowPreviews("distribution");
         if (index <= _sections.ToList().FindIndex(section => section.Key == "distance"))
-            RemovePreviews("distance_nearest", "distance_boundary");
+            RemoveWorkflowPreviews("distance");
         _outputFiles.Clear();
 
         for (var position = index + 1; position < _sections.Count; position++) _sections[position].Status = WorkflowStatus.NotStarted;
