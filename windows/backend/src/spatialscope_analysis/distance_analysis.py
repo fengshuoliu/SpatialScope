@@ -17,7 +17,22 @@ from scipy.spatial import cKDTree
 from scipy.stats import ttest_ind, ttest_rel
 from skimage import segmentation
 
+from .compute_runtime import get_compute_runtime
 from .io import load_any_tiff, safe_name, valid_pixel_size
+
+
+def _cells_of_type(df_cells: pd.DataFrame, type_name: str) -> pd.DataFrame:
+    """Select a type through the shared exact integer compute scheduler."""
+    values = df_cells["celltype"].astype(str)
+    codes, uniques = pd.factorize(values, sort=True)
+    matches = np.flatnonzero(np.asarray(uniques, dtype=str) == str(type_name))
+    if matches.size == 0:
+        return df_cells.iloc[0:0].copy()
+    mask = get_compute_runtime().equal_scalar(
+        codes.astype(np.int32, copy=False),
+        int(matches[0]),
+    ).astype(bool, copy=False)
+    return df_cells.loc[mask].copy()
 
 def _format_p(p_val: float) -> str:
     if not np.isfinite(p_val):
@@ -137,8 +152,8 @@ def run_nearest_neighbor_analysis(
     px_um_x, px_um_y = float(pixel_size_um[0]), float(pixel_size_um[1])
 
     def nearest_pairs(df: pd.DataFrame, target_type_local: str, query_type_local: str) -> pd.DataFrame:
-        tdf = df[df["celltype"].astype(str) == str(target_type_local)].copy()
-        qdf = df[df["celltype"].astype(str) == str(query_type_local)].copy()
+        tdf = _cells_of_type(df, target_type_local)
+        qdf = _cells_of_type(df, query_type_local)
 
         if len(tdf) == 0:
             raise ValueError(f"No cells found for target_type={target_type_local!r}")
@@ -258,7 +273,7 @@ def run_nearest_neighbor_analysis(
         if query_type != target_type:
             all_rows.append(nearest_pairs(df, target_type, query_type))
         else:
-            tdf = df[df["celltype"] == target_type].copy()
+            tdf = _cells_of_type(df, target_type)
             if len(tdf) < 2:
                 raise ValueError(f"Need at least 2 cells of type {target_type!r} for self-type nearest neighbor.")
             tx = tdf["centroid_x_px"].to_numpy(float) * px_um_x
@@ -449,11 +464,15 @@ def run_boundary_distance_analysis(
     if not np.any(boundary_mask):
         raise RuntimeError("Boundary mask is empty (no boundary pixels).")
 
-    dist_map_um = ndi.distance_transform_edt(~boundary_mask, sampling=(px_um_y, px_um_x))
+    distance_input = get_compute_runtime().equal_scalar(
+        boundary_mask.astype(np.uint8),
+        0,
+    ).astype(bool, copy=False)
+    dist_map_um = ndi.distance_transform_edt(distance_input, sampling=(px_um_y, px_um_x))
 
     rows: List[pd.DataFrame] = []
     for query_type in query_types:
-        sub = df_cells[df_cells["celltype"].astype(str) == str(query_type)].copy()
+        sub = _cells_of_type(df_cells, query_type)
         if len(sub) == 0:
             continue
 

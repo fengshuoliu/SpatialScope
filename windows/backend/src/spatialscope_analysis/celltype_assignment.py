@@ -22,6 +22,7 @@ from matplotlib.patches import Rectangle
 from scipy import ndimage as ndi
 from skimage import filters, measure, morphology, segmentation
 
+from .compute_runtime import get_compute_runtime
 from .io import load_any_tiff, load_text_grid, save_uint16_tiff, write_json
 from .visualization import (
     add_colored_type_text,
@@ -292,7 +293,10 @@ def _run_celltype_assignment_impl(
     cpu = os.cpu_count() or 1
     target_threads = int(native_threads) if native_threads is not None else int(os.environ.get("OMP_NUM_THREADS", max(1, cpu - 1)))
     target_threads = max(1, target_threads)
-    numba_threads = min(target_threads, 24)
+    # The native Windows client defaults ``native_threads`` to every logical
+    # processor.  Respect that budget instead of silently capping Numba at 24
+    # threads on larger workstations.
+    numba_threads = target_threads
     support_n_jobs = max(1, int(support_workers if support_workers is not None else target_threads))
 
     if labels is None:
@@ -538,14 +542,17 @@ def _run_celltype_assignment_impl(
             }
         )
 
-        assign_map = np.zeros_like(labels, dtype=np.uint16)
-
-        inside_mask = (labels > 0) & pos_mask
-        assign_map[inside_mask] = labels[inside_mask].astype(np.uint16)
-
-        band_mask = pos_mask & voronoi_band
-        nonbuf_mask = band_mask & (~buffer_zone)
-        assign_map[nonbuf_mask] = nearest_label_map[nonbuf_mask].astype(np.uint16)
+        # Exact integer ownership is the dominant full-image pass for every
+        # marker.  Split it across the complete OpenCL device set and the CPU
+        # pool; only the genuinely ambiguous buffer pixels continue into the
+        # ordered voting kernel below.
+        assign_map = get_compute_runtime().assignment_base(
+            labels,
+            pos_mask,
+            voronoi_band,
+            buffer_zone,
+            nearest_label_map,
+        ).astype(np.uint16, copy=False)
 
         by, bx = np.nonzero(pos_mask & buffer_zone)
         if by.size:

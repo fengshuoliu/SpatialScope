@@ -37,6 +37,7 @@ except Exception:  # pragma: no cover - optional runtime dependency guard
 from skimage import feature, filters, measure, morphology, segmentation
 from skimage.measure import find_contours
 
+from .compute_runtime import get_compute_runtime
 from .io import save_uint16_tiff, to_image, write_json
 from .models import NucleiParams
 from .visualization import norm_clip
@@ -1522,7 +1523,10 @@ def segment_nuclei_from_prepared_images(
     valid_components = valid_components[valid_components > 0]
     remap = np.zeros(component_areas.shape[0], dtype=np.int32)
     remap[valid_components] = np.arange(1, valid_components.size + 1, dtype=np.int32)
-    return remap[component_labels]
+    # Canonical relabeling is an exact integer lookup, so every compatible GPU
+    # and the CPU pool can share this real segmentation work without changing
+    # component identities or the macOS-compatible algorithm.
+    return get_compute_runtime().lookup_labels(component_labels, remap).astype(np.int32, copy=False)
 
 
 def summarize_nuclei_labels(

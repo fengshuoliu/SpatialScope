@@ -79,6 +79,8 @@ if ($Command -eq "setup") {
 if ($Command -eq "test") {
     & $VenvPython -m compileall -q $BackendRoot $TestsRoot
     Assert-Success "native Python compile check"
+    & $VenvPython -m unittest discover -s $TestsRoot -p "test_compute_runtime.py" -v
+    Assert-Success "CPU and OpenCL compute parity tests"
     & $VenvPython (Join-Path $BackendRoot "native_engine.py") --smoke-test
     Assert-Success "source Matplotlib renderer smoke test"
     dotnet build $ProjectPath --configuration Release

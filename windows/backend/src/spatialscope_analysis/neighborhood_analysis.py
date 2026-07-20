@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.colors import ListedColormap
 
+from .compute_runtime import get_compute_runtime
 from .io import save_uint16_tiff, valid_pixel_size, write_json
 from .visualization import add_scalebar_20um, axis_off
 
@@ -128,8 +129,18 @@ def run_neighborhood_analysis(
     cluster_key_to_id = dict(zip(cluster_order_df['cluster_key'], cluster_order_df['cluster_id']))
     tile_assignments['cluster_id'] = tile_assignments['cluster_key'].map(cluster_key_to_id).astype(int)
 
-    for row in tile_assignments.itertuples(index=False):
-        cluster_mask[int(row.y0_px):int(row.y1_px), int(row.x0_px):int(row.x1_px)] = int(row.cluster_id)
+    tile_cluster_ids = np.zeros((n_tiles_y, n_tiles_x), dtype=np.uint16)
+    tile_cluster_ids[
+        tile_assignments["tile_row"].to_numpy(dtype=np.intp),
+        tile_assignments["tile_col"].to_numpy(dtype=np.intp),
+    ] = tile_assignments["cluster_id"].to_numpy(dtype=np.uint16)
+    cluster_mask = get_compute_runtime().expand_tile_grid(
+        tile_cluster_ids,
+        height,
+        width,
+        tile_h_px,
+        tile_w_px,
+    ).astype(np.uint16, copy=False)
 
     cluster_summary = (
         tile_assignments.groupby(['cluster_id', 'cluster_label', 'cluster_key'], as_index=False)
