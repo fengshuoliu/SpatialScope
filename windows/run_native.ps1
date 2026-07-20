@@ -14,6 +14,7 @@ $VenvPython = Join-Path $VenvRoot "Scripts\python.exe"
 $RequirementsPath = Join-Path $BackendRoot "requirements-native.txt"
 $RequirementsStamp = Join-Path $VenvRoot "requirements-native.sha256"
 $ProjectPath = Join-Path $WindowsRoot "native\src\SpatialScope.App\SpatialScope.App.csproj"
+$UpdaterTestProject = Join-Path $WindowsRoot "native\tests\SpatialScope.Updater.ContractTests\SpatialScope.Updater.ContractTests.csproj"
 $SmokeRoot = Join-Path $WindowsRoot "build\smoke-output"
 $SyntheticInput = Join-Path $SmokeRoot "synthetic_input"
 
@@ -83,6 +84,8 @@ if ($Command -eq "test") {
     Assert-Success "CPU and OpenCL compute parity tests"
     & $VenvPython (Join-Path $BackendRoot "native_engine.py") --smoke-test
     Assert-Success "source Matplotlib renderer smoke test"
+    dotnet run --project $UpdaterTestProject --configuration Release
+    Assert-Success "native updater contract tests"
     dotnet build $ProjectPath --configuration Release
     Assert-Success "native WPF build"
 

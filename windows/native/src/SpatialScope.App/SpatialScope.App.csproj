@@ -10,7 +10,7 @@
     <AssemblyName>SpatialScope</AssemblyName>
     <RootNamespace>SpatialScope.Windows</RootNamespace>
     <ApplicationIcon>..\..\..\desktop\assets\SpatialScope.ico</ApplicationIcon>
-    <Version>1.2.4</Version>
+    <Version>1.2.5</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Authors>SpatialScope</Authors>
     <Product>SpatialScope for Windows</Product>
@@ -20,6 +20,10 @@
     <Using Remove="System.Drawing" />
     <Using Remove="System.Windows.Forms" />
     <Resource Include="..\..\..\desktop\assets\SpatialScope.png" Link="Assets\SpatialScope.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SpatialScope.Updater\SpatialScope.Updater.csproj" />
   </ItemGroup>
 
 </Project>

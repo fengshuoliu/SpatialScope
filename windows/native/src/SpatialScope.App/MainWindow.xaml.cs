@@ -225,6 +225,10 @@ public partial class MainWindow : Window
             _sections[0].Status = WorkflowStatus.Error;
             UpdateHeader();
         }
+        finally
+        {
+            BeginAutomaticUpdateCheck();
+        }
     }
 
     private async void MainWindow_Closing(object? sender, CancelEventArgs e)
@@ -234,6 +238,7 @@ public partial class MainWindow : Window
         e.Cancel = true;
         if (_closeInProgress) return;
         _closeInProgress = true;
+        CancelUpdateOperations();
 
         _cpuMonitor.Dispose();
         try
@@ -300,6 +305,15 @@ public partial class MainWindow : Window
                 "1",
                 StringComparison.Ordinal))
         {
+            if (int.TryParse(
+                    Environment.GetEnvironmentVariable("SPATIALSCOPE_QA_EXIT_DELAY_MS"),
+                    NumberStyles.Integer,
+                    CultureInfo.InvariantCulture,
+                    out var exitDelayMilliseconds)
+                && exitDelayMilliseconds > 0)
+            {
+                await Task.Delay(Math.Min(exitDelayMilliseconds, 30_000));
+            }
             Close();
         }
     }
@@ -346,6 +360,7 @@ public partial class MainWindow : Window
         ScaleLabel.Text = _localization["Scale"];
         ComputeLabel.Text = _localization["Compute"];
         OpenOutputButton.Content = _localization["OpenOutput"];
+        RefreshUpdateControls();
         AutomationProperties.SetName(OperationProgress, _localization["Progress"]);
         AutomationProperties.SetName(StatusSurface, _localization["Status"]);
 
@@ -467,6 +482,7 @@ public partial class MainWindow : Window
         WorkflowItemsControl.IsEnabled = !busy;
         DetailHost.IsEnabled = !busy;
         LanguageComboBox.IsEnabled = !busy;
+        RefreshUpdateControls();
         OpenOutputButton.IsEnabled = !busy
             && !string.IsNullOrWhiteSpace(_outputFolder)
             && Directory.Exists(_outputFolder);
@@ -3175,8 +3191,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        var isSuccess = resourceKey is "AnalysisComplete" or "ConfigurationSaved" or "ExistingResultsRestored" or "SuggestedComboApplied";
-        var isRunning = resourceKey is "Running" or "CheckingExistingResults";
+        var isSuccess = resourceKey is "AnalysisComplete" or "ConfigurationSaved" or "ExistingResultsRestored" or "SuggestedComboApplied" or "ApplicationUpToDate" or "UpdateVerified";
+        var isRunning = resourceKey is "Running" or "CheckingExistingResults" or "CheckingForUpdates";
         if (isSuccess)
         {
             StatusSurface.Background = new SolidColorBrush(Color.FromRgb(234, 247, 239));

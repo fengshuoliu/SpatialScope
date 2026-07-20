@@ -2,6 +2,15 @@
 
 All notable changes to SpatialScope are documented here.
 
+## 1.2.5 - 2026-07-20 (Windows)
+
+- Added a native automatic update check against the stable Windows channel on GitHub Releases, plus a manual **Check for updates** action in the sidebar.
+- Required an exact Windows setup/checksum asset pair, GitHub's SHA-256 asset digest, the published checksum entry, trusted HTTPS download hosts, and the declared asset size before an installer can run.
+- Added an explicit install prompt, background download progress, clean analysis-engine shutdown, silent in-place installation, and automatic relaunch after a verified update.
+- Added single-instance and installer-ownership safeguards so another running or moved copy cannot be overwritten during an update.
+- Kept update failures isolated from scientific workflow state, throttled automatic checks to once per day, and disabled network checks during deterministic release smoke tests.
+- Preserved the macOS application, Sparkle appcast, release tags, and artifacts unchanged.
+
 ## 1.2.4 - 2026-07-20 (Windows)
 
 - Made Distance Analysis mode-specific: nearest-neighbor keeps its Target selector, while cell-to-boundary runs directly from a boundary and one or more compact query-cell selections.
