@@ -24,7 +24,7 @@ SpatialScope for macOS supports macOS 13 or later on Apple Silicon and Intel Mac
 | Platform | Status | Repository location |
 | --- | --- | --- |
 | macOS | Version 1.2.1 | Current Xcode project |
-| Windows x64 | Version 1.2.4 | [`windows/`](windows/) |
+| Windows x64 | Version 1.2.5 | [`windows/`](windows/) |
 
 Both platforms use the same `SpatialScope` product identity, analysis definitions, and output contracts. Platform versions and release tags are tracked independently.
 
@@ -62,7 +62,7 @@ The Windows build freezes the scientific analysis engine, runs deterministic Ste
 
 ## Updates
 
-On macOS, SpatialScope uses [Sparkle](https://sparkle-project.org/) with EdDSA-signed archives. Windows updates are installed by downloading and running the latest Windows setup program. Release binaries are hosted by GitHub Releases.
+On macOS, SpatialScope uses [Sparkle](https://sparkle-project.org/) with EdDSA-signed archives. SpatialScope 1.2.5 and later automatically check the stable Windows release channel once per day; after user confirmation, Windows downloads and verifies the setup program, installs it after a clean shutdown, and reopens the app. Release binaries are hosted by GitHub Releases.
 
 ## Acknowledgements
 

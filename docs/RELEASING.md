@@ -1,6 +1,6 @@
 # Release SpatialScope Through GitHub
 
-SpatialScope distributes ad-hoc-signed macOS builds and unsigned Windows x64 builds through GitHub Releases. The platforms release independently: macOS 1.2.1 uses Sparkle for updates, while Windows 1.2.4 is a native WPF application distributed with a setup executable. Apple Developer Program and commercial Windows code-signing memberships are not required. Users approve the app once through macOS Privacy & Security or Windows SmartScreen.
+SpatialScope distributes ad-hoc-signed macOS builds and unsigned Windows x64 builds through GitHub Releases. The platforms release independently: macOS 1.2.1 uses Sparkle for updates, while Windows 1.2.5 is a native WPF application with a verified GitHub release updater. Apple Developer Program and commercial Windows code-signing memberships are not required. Users approve the app once through macOS Privacy & Security or Windows SmartScreen.
 
 ## Platform versions and tags
 
@@ -18,10 +18,10 @@ https://fengshuoliu.github.io/SpatialScope/download/windows/
 
 The router ignores drafts and prereleases, selects the most recently published matching platform tag, and requires the stable asset name listed below. Keep version-pinned GitHub asset URLs in release records and the Sparkle feed; use the router for public “latest” download links.
 
-For Windows 1.2.4, use the tag `windows-v1.2.4`. Its stable download URL is:
+For Windows 1.2.5, use the tag `windows-v1.2.5`. Its stable download URL is:
 
 ```text
-https://github.com/fengshuoliu/SpatialScope/releases/download/windows-v1.2.4/SpatialScope-Windows-x64-Setup.exe
+https://github.com/fengshuoliu/SpatialScope/releases/download/windows-v1.2.5/SpatialScope-Windows-x64-Setup.exe
 ```
 
 The macOS download URL remains pinned to its platform release:
@@ -94,8 +94,19 @@ https://github.com/fengshuoliu/SpatialScope/releases/download/v1.2.1/SpatialScop
    windows/native/dist/SHA256SUMS-Windows.txt
    ```
 
-6. Run the setup program, launch SpatialScope from its installed shortcut, and verify native input/output folder selection, Step 2 SVG and PNG generation, one representative complete workflow, exported files, reopening the output folder, and uninstalling from Windows Settings.
-7. Push the release branch and wait for the Windows workflow to pass. Download the `SpatialScope-Windows-x64` workflow artifact and confirm that it contains only the setup executable and Windows checksum file. The workflow runs the frozen renderer, Step 2, and the complete synthetic nine-stage analysis before packaging.
+6. Run the setup program, launch SpatialScope from its installed shortcut, and verify native input/output folder selection, the sidebar **Check for updates** action, Step 2 SVG and PNG generation, one representative complete workflow, exported files, reopening the output folder, and uninstalling from Windows Settings.
+7. Push the release branch and wait for the Windows workflow to pass. Download the `SpatialScope-Windows-x64` workflow artifact and confirm that it contains only the setup executable and Windows checksum file. The workflow runs the updater contract tests, frozen renderer, Step 2, and the complete synthetic nine-stage analysis before packaging.
+
+### Windows update channel contract
+
+The native updater queries `https://api.github.com/repos/fengshuoliu/SpatialScope/releases?per_page=100`; it never uses the repository-wide `/releases/latest` route because that route can point to either platform. A Windows update is eligible only when it is a published, non-prerelease `windows-v<version>` release newer than the installed version and contains exactly one uploaded, nonempty asset with each stable name:
+
+```text
+SpatialScope-Windows-x64-Setup.exe
+SHA256SUMS-Windows.txt
+```
+
+Before installation, the updater requires the exact GitHub download path, a valid GitHub `sha256:` asset digest, the declared asset size, and a matching exact filename entry in `SHA256SUMS-Windows.txt`. Do not rename these assets, attach duplicates, omit the checksum, or publish the release before both uploads finish. Existing 1.2.4 and earlier installations need one manual installation of 1.2.5; 1.2.5 and later check this channel automatically once per day.
 
 ## Generate the Sparkle feed for macOS
 
@@ -147,13 +158,13 @@ Inspect `docs/appcast.xml` before publishing. It must contain the new version, b
 1. Commit and push the Windows version, changelog, source changes, and release documentation.
 2. Create the tag `windows-v<version>` from the tested commit.
 3. Create a normal GitHub release named `SpatialScope <version> for Windows`. Upload `SpatialScope-Windows-x64-Setup.exe` and `SHA256SUMS-Windows.txt`.
-4. Set the GitHub Releases API field `make_latest` deliberately. Windows 1.2.4 is published as the repository's Latest release; the platform-aware download routes keep both platforms available independently.
-5. Publish the Windows release and verify the pinned setup URL, automatic Windows download route, installer launch, checksum, installation, application launch, and uninstall on Windows 10 or 11.
+4. Set the GitHub Releases API field `make_latest` deliberately. Windows 1.2.5 is published as the repository's Latest release; the platform-aware download routes keep both platforms available independently.
+5. Publish the Windows release and verify the pinned setup URL, automatic Windows download route, GitHub asset digest, checksum, installation, application launch, manual in-app update check, and uninstall on Windows 10 or 11.
 6. Confirm that `https://github.com/fengshuoliu/SpatialScope/releases/latest` resolves to the intended repository-wide release and that both platform-aware download routes select the newest published release for their platform.
 7. Do not regenerate or commit `docs/appcast.xml` for this Windows-only release.
 8. Keep public Windows download links pointed at `download/windows/`. Do not use `/releases/latest/download/` for a platform-specific asset because GitHub has only one repository-wide Latest release.
 
-Keep the existing macOS release notes, `v1.2.1` tag, assets, Xcode version, and Sparkle appcast unchanged when publishing Windows 1.2.4.
+Keep the existing macOS release notes, `v1.2.1` tag, assets, Xcode version, and Sparkle appcast unchanged when publishing Windows 1.2.5.
 
 ## Rollback
 

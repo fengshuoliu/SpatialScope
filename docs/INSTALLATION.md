@@ -22,7 +22,11 @@ The installer keeps the application and its private analysis engine together. Do
 
 ### Windows updates
 
-Windows updates are manual. Close SpatialScope, download the latest Windows setup program from GitHub Releases, and run it to update the installed application. The installer does not remove analysis files from output folders you selected separately.
+SpatialScope 1.2.5 and later automatically check the stable Windows release channel once every 24 hours. You can also select **Check for updates** in the bottom-left sidebar at any time. When a newer version is available, choose **Yes** to download it. SpatialScope verifies the GitHub asset digest, declared size, and `SHA256SUMS-Windows.txt`, then closes cleanly, installs the update, and reopens automatically. An update never removes analysis files from output folders you selected separately.
+
+Automatic installation is enabled only for the copy registered by the Windows setup program. If an app copy was moved or launched from a source/build folder, it remains open and directs you to the stable Windows download page instead of attempting an unsafe in-place replacement.
+
+SpatialScope 1.2.4 and earlier cannot receive the updater retroactively. Download and run the latest setup program once from the Windows link above; future Windows releases can then update from inside the app.
 
 ## macOS 13 or later
 

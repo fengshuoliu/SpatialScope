@@ -16,6 +16,8 @@ windows/desktop/dist/
 windows/build/
 windows/native/src/**/bin/
 windows/native/src/**/obj/
+windows/native/tests/**/bin/
+windows/native/tests/**/obj/
 windows/native/dist/
 release-assets/
 design-qa/

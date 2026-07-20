@@ -14,6 +14,7 @@ $TestsRoot = Join-Path $WindowsRoot "tests"
 $NativeRoot = Join-Path $WindowsRoot "native"
 $InstallerScript = Join-Path $WindowsRoot "installer\SpatialScope.nsi"
 $ProjectPath = Join-Path $NativeRoot "src\SpatialScope.App\SpatialScope.App.csproj"
+$UpdaterTestProject = Join-Path $NativeRoot "tests\SpatialScope.Updater.ContractTests\SpatialScope.Updater.ContractTests.csproj"
 $BuildRoot = Join-Path $WindowsRoot "build\native-release"
 $PyInstallerWork = Join-Path $BuildRoot "pyinstaller-work"
 $EngineDistRoot = Join-Path $BuildRoot "engine-dist"
@@ -115,6 +116,8 @@ try {
     Assert-Success "exact optimizer parity and acceleration smoke test"
     & $PythonExe (Join-Path $BackendRoot "native_engine.py") --smoke-test
     Assert-Success "source Matplotlib renderer smoke test"
+    dotnet run --project $UpdaterTestProject --configuration Release
+    Assert-Success "native updater contract tests"
     dotnet build $ProjectPath --configuration Release
     Assert-Success "native WPF build"
 
@@ -263,12 +266,132 @@ try {
         -not (Test-Path -LiteralPath $SmokeMarker)) {
         throw "The installer smoke test did not install the app, engine, and safety markers."
     }
+
+    # Exercise the updater handoff itself with the installed app as the real
+    # blocker: NSIS must wait for its PID and named mutex, replace only the
+    # owned installation, then relaunch the updated app.
+    $PreUpdateCapturePath = Join-Path $InstallerSmokeRoot "pre-update-app.png"
+    $UpdateCapturePath = Join-Path $InstallerSmokeRoot "updated-app.png"
+    $UpdatePreviousCapturePath = $env:SPATIALSCOPE_CAPTURE_PATH
+    $UpdatePreviousCaptureExit = $env:SPATIALSCOPE_CAPTURE_EXIT
+    $UpdatePreviousExitDelay = $env:SPATIALSCOPE_QA_EXIT_DELAY_MS
+    $UpdateHadCheckSetting = Test-Path -LiteralPath Env:SPATIALSCOPE_DISABLE_UPDATE_CHECK
+    $UpdatePreviousCheckSetting = $env:SPATIALSCOPE_DISABLE_UPDATE_CHECK
+    $PriorInstalledProcess = $null
+    $DuplicateInstalledProcess = $null
+    $UpdateInstallerProcess = $null
+    try {
+        $env:SPATIALSCOPE_CAPTURE_PATH = $PreUpdateCapturePath
+        $env:SPATIALSCOPE_CAPTURE_EXIT = "1"
+        $env:SPATIALSCOPE_QA_EXIT_DELAY_MS = "5000"
+        $env:SPATIALSCOPE_DISABLE_UPDATE_CHECK = "1"
+        [System.IO.File]::WriteAllText($InstallMarker, "waiting for prior process", [System.Text.Encoding]::ASCII)
+        $PriorInstalledProcess = Start-Process -FilePath $InstalledApp -WindowStyle Hidden -PassThru
+        $PreUpdateCaptureDeadline = [DateTime]::UtcNow.AddSeconds(30)
+        while (-not (Test-Path -LiteralPath $PreUpdateCapturePath) -and
+            -not $PriorInstalledProcess.HasExited -and
+            [DateTime]::UtcNow -lt $PreUpdateCaptureDeadline) {
+            Start-Sleep -Milliseconds 200
+        }
+        if (-not (Test-Path -LiteralPath $PreUpdateCapturePath) -or $PriorInstalledProcess.HasExited) {
+            throw "The installed app did not enter the updater PID-wait smoke-test state."
+        }
+
+        $DuplicateCapturePath = Join-Path $InstallerSmokeRoot "duplicate-app.png"
+        $env:SPATIALSCOPE_CAPTURE_PATH = $DuplicateCapturePath
+        $env:SPATIALSCOPE_QA_EXIT_DELAY_MS = "0"
+        $DuplicateInstalledProcess = Start-Process -FilePath $InstalledApp -WindowStyle Hidden -PassThru
+        if (-not $DuplicateInstalledProcess.WaitForExit(5000)) {
+            throw "A duplicate SpatialScope instance did not exit while the primary instance held the mutex."
+        }
+        if (Test-Path -LiteralPath $DuplicateCapturePath) {
+            throw "A duplicate SpatialScope instance opened a window instead of respecting the single-instance mutex."
+        }
+
+        # The installer inherits these values for the app it relaunches; the
+        # already-running old process retains its original delayed-exit values.
+        $env:SPATIALSCOPE_CAPTURE_PATH = $UpdateCapturePath
+        $env:SPATIALSCOPE_QA_EXIT_DELAY_MS = "0"
+        $UpdateInstallerProcess = Start-Process `
+            -FilePath $SetupExe `
+            -ArgumentList @("/S", "/SMOKETEST", "/UPDATEPID=$($PriorInstalledProcess.Id)", "/D=$InstalledRoot") `
+            -WindowStyle Hidden `
+            -PassThru
+        Start-Sleep -Milliseconds 1000
+        if ($UpdateInstallerProcess.HasExited) {
+            throw "The update installer did not wait for the previous application PID."
+        }
+        if ((Get-Content -LiteralPath $InstallMarker -Raw) -ne "waiting for prior process") {
+            throw "The update installer modified files before the previous application PID exited."
+        }
+        if (-not $PriorInstalledProcess.WaitForExit(20000)) {
+            throw "The old installed app did not exit during the updater handoff smoke test."
+        }
+        if (-not $UpdateInstallerProcess.WaitForExit(60000) -or $UpdateInstallerProcess.ExitCode -ne 0) {
+            throw "The update installer did not finish successfully after the previous PID exited."
+        }
+        if ((Get-Content -LiteralPath $InstallMarker -Raw).Trim() -ne "SpatialScope $Version") {
+            throw "The update installer did not replace the owned installation after the previous PID exited."
+        }
+        $UpdateCaptureDeadline = [DateTime]::UtcNow.AddSeconds(60)
+        while (-not (Test-Path -LiteralPath $UpdateCapturePath) -and [DateTime]::UtcNow -lt $UpdateCaptureDeadline) {
+            Start-Sleep -Milliseconds 200
+        }
+        if (-not (Test-Path -LiteralPath $UpdateCapturePath)) {
+            throw "The update installer did not relaunch the updated SpatialScope app."
+        }
+
+        # Do not start the following launch smoke until the relaunched app has
+        # released the single-instance mutex and completed engine shutdown.
+        $MutexExitDeadline = [DateTime]::UtcNow.AddSeconds(30)
+        $MutexStillExists = $true
+        while ($MutexStillExists -and [DateTime]::UtcNow -lt $MutexExitDeadline) {
+            $MutexProbe = $null
+            try {
+                $MutexProbe = [System.Threading.Mutex]::OpenExisting("Local\SpatialScope.Windows.Application")
+                $MutexStillExists = $true
+            }
+            catch [System.Threading.WaitHandleCannotBeOpenedException] {
+                $MutexStillExists = $false
+            }
+            finally {
+                if ($MutexProbe) { $MutexProbe.Dispose() }
+            }
+            if ($MutexStillExists) { Start-Sleep -Milliseconds 200 }
+        }
+        if ($MutexStillExists) {
+            throw "The relaunched updated app did not complete a clean shutdown."
+        }
+    }
+    finally {
+        if ($PriorInstalledProcess -and -not $PriorInstalledProcess.HasExited) {
+            Stop-Process -Id $PriorInstalledProcess.Id -Force -ErrorAction SilentlyContinue
+        }
+        if ($DuplicateInstalledProcess -and -not $DuplicateInstalledProcess.HasExited) {
+            Stop-Process -Id $DuplicateInstalledProcess.Id -Force -ErrorAction SilentlyContinue
+        }
+        if ($UpdateInstallerProcess -and -not $UpdateInstallerProcess.HasExited) {
+            Stop-Process -Id $UpdateInstallerProcess.Id -Force -ErrorAction SilentlyContinue
+        }
+        $env:SPATIALSCOPE_CAPTURE_PATH = $UpdatePreviousCapturePath
+        $env:SPATIALSCOPE_CAPTURE_EXIT = $UpdatePreviousCaptureExit
+        $env:SPATIALSCOPE_QA_EXIT_DELAY_MS = $UpdatePreviousExitDelay
+        if ($UpdateHadCheckSetting) {
+            $env:SPATIALSCOPE_DISABLE_UPDATE_CHECK = $UpdatePreviousCheckSetting
+        } else {
+            Remove-Item -LiteralPath Env:SPATIALSCOPE_DISABLE_UPDATE_CHECK -ErrorAction SilentlyContinue
+        }
+    }
+
     $CapturePath = Join-Path $InstallerSmokeRoot "installed-app.png"
     $PreviousCapturePath = $env:SPATIALSCOPE_CAPTURE_PATH
     $PreviousCaptureExit = $env:SPATIALSCOPE_CAPTURE_EXIT
+    $HadUpdateCheckSetting = Test-Path -LiteralPath Env:SPATIALSCOPE_DISABLE_UPDATE_CHECK
+    $PreviousUpdateCheckSetting = $env:SPATIALSCOPE_DISABLE_UPDATE_CHECK
     try {
         $env:SPATIALSCOPE_CAPTURE_PATH = $CapturePath
         $env:SPATIALSCOPE_CAPTURE_EXIT = "1"
+        $env:SPATIALSCOPE_DISABLE_UPDATE_CHECK = "1"
         $InstalledProcess = Start-Process -FilePath $InstalledApp -WindowStyle Hidden -PassThru
         if (-not $InstalledProcess.WaitForExit(30000)) {
             Stop-Process -Id $InstalledProcess.Id -Force -ErrorAction SilentlyContinue
@@ -278,6 +401,11 @@ try {
     finally {
         $env:SPATIALSCOPE_CAPTURE_PATH = $PreviousCapturePath
         $env:SPATIALSCOPE_CAPTURE_EXIT = $PreviousCaptureExit
+        if ($HadUpdateCheckSetting) {
+            $env:SPATIALSCOPE_DISABLE_UPDATE_CHECK = $PreviousUpdateCheckSetting
+        } else {
+            Remove-Item -LiteralPath Env:SPATIALSCOPE_DISABLE_UPDATE_CHECK -ErrorAction SilentlyContinue
+        }
     }
     if (-not (Test-Path -LiteralPath $CapturePath)) {
         throw "The installed SpatialScope app did not render its launch capture."

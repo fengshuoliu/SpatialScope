@@ -22,8 +22,12 @@ Unicode true
 !define APP_REGISTRY_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\SpatialScope"
 !define INSTALL_MARKER ".spatialscope-install"
 !define SMOKE_MARKER ".spatialscope-smoke"
+!define INSTANCE_MUTEX "Local\SpatialScope.Windows.Application"
 
 Var SmokeMode
+Var UpdateMode
+Var UpdatePid
+Var InstanceMutexHandle
 
 Name "${APP_NAME}"
 OutFile "${OUTPUT_DIR}\SpatialScope-Windows-x64-Setup.exe"
@@ -62,11 +66,54 @@ VIAddVersionKey /LANG=1033 "FileVersion" "${APP_VERSION}.0"
 
 Function .onInit
   StrCpy $SmokeMode "0"
+  StrCpy $UpdateMode "0"
+  StrCpy $UpdatePid ""
+  StrCpy $InstanceMutexHandle "0"
   ${GetParameters} $R0
   ClearErrors
   ${GetOptions} $R0 "/SMOKETEST" $R1
   ${IfNot} ${Errors}
     StrCpy $SmokeMode "1"
+  ${EndIf}
+
+  ; The verified installer is started before SpatialScope closes. Wait for
+  ; that exact process to finish so the executable and analysis engine are
+  ; never replaced while they are still running.
+  ClearErrors
+  ${GetOptions} $R0 "/UPDATEPID=" $UpdatePid
+  ${IfNot} ${Errors}
+    StrCpy $UpdateMode "1"
+    ; Atomically open the app's named mutex or create it if the old process
+    ; already exited. Keeping this handle alive prevents a new app launch from
+    ; entering the installation while files are being replaced.
+    System::Call 'kernel32::CreateMutexW(p 0, i 0, w "${INSTANCE_MUTEX}") p.R4'
+    StrCpy $InstanceMutexHandle $R4
+    ${If} $InstanceMutexHandle == 0
+      SetErrorLevel 6
+      Quit
+    ${EndIf}
+    System::Call 'kernel32::OpenProcess(i 0x00100000, i 0, i $UpdatePid) p.R2'
+    ${If} $R2 != 0
+      System::Call 'kernel32::WaitForSingleObject(p $R2, i 300000) i.R3'
+      System::Call 'kernel32::CloseHandle(p $R2)'
+      ${If} $R3 != 0
+        SetErrorLevel 4
+        Quit
+      ${EndIf}
+    ${EndIf}
+    ${If} $InstanceMutexHandle != 0
+      System::Call 'kernel32::WaitForSingleObject(p $InstanceMutexHandle, i 300000) i.R3'
+      ${If} $R3 != 0
+        ; WAIT_ABANDONED (0x80) still grants safe ownership if the old app
+        ; terminated unexpectedly instead of releasing the mutex cleanly.
+        ${If} $R3 != 0x80
+          System::Call 'kernel32::CloseHandle(p $InstanceMutexHandle)'
+          StrCpy $InstanceMutexHandle "0"
+          SetErrorLevel 5
+          Quit
+        ${EndIf}
+      ${EndIf}
+    ${EndIf}
   ${EndIf}
 FunctionEnd
 
@@ -78,6 +125,13 @@ FunctionEnd
 
 Section "SpatialScope" SEC_MAIN
   SetShellVarContext current
+
+  ${If} $UpdateMode == "1"
+    IfFileExists "$INSTDIR\${INSTALL_MARKER}" updater_owned_install 0
+      SetErrorLevel 3
+      Abort
+    updater_owned_install:
+  ${EndIf}
 
   ; Only replace files in a directory that a previous SpatialScope installer
   ; explicitly marked as its own. This prevents a custom installation path
@@ -123,6 +177,18 @@ Section "SpatialScope" SEC_MAIN
     WriteRegStr HKCU "${APP_REGISTRY_KEY}" "UninstallString" "$\"$INSTDIR\Uninstall SpatialScope.exe$\""
     WriteRegDWORD HKCU "${APP_REGISTRY_KEY}" "NoModify" 1
     WriteRegDWORD HKCU "${APP_REGISTRY_KEY}" "NoRepair" 1
+
+  ${EndIf}
+
+  ; Update mode always relaunches, including the isolated SMOKETEST path used
+  ; by CI to prove the complete wait-install-reopen handoff.
+  ${If} $UpdateMode == "1"
+    ${If} $InstanceMutexHandle != 0
+      System::Call 'kernel32::ReleaseMutex(p $InstanceMutexHandle)'
+      System::Call 'kernel32::CloseHandle(p $InstanceMutexHandle)'
+      StrCpy $InstanceMutexHandle "0"
+    ${EndIf}
+    Exec '"$INSTDIR\SpatialScope.exe"'
   ${EndIf}
 SectionEnd
 
