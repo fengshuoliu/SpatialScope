@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 import contextlib
 import hashlib
+import html
 import io
 import json
 import math
 import mimetypes
 import os
+import re
 import subprocess
 import sys
 import traceback
@@ -35,9 +38,10 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+from matplotlib import colors as mcolors
 import numpy as np
 import pandas as pd
-from PIL import Image
+from PIL import Image, ImageDraw
 
 BACKEND_DIR = Path(__file__).resolve().parent
 if str(BACKEND_DIR) not in sys.path:
@@ -72,6 +76,7 @@ from src.spatialscope_analysis.io import (  # noqa: E402
     files_to_long_df,
     list_output_files,
     load_any_tiff,
+    safe_name,
     write_json,
 )
 from src.spatialscope_analysis.models import (  # noqa: E402
@@ -90,7 +95,14 @@ from src.spatialscope_analysis.nuclei_segmentation import (  # noqa: E402
     run_nuclei_parameter_optimizer,
     run_nuclei_segmentation,
 )
-from src.spatialscope_analysis.region_analysis import run_region_boundary_analysis  # noqa: E402
+from src.spatialscope_analysis.region_analysis import (  # noqa: E402
+    build_region_mask_from_cell_labels,
+    draw_region_boundaries_rgb,
+    make_region_canvas_rgb,
+    run_region_boundary_analysis,
+    save_adjusted_region_analysis,
+    um_to_px_iso,
+)
 from src.spatialscope_analysis.visualization import (  # noqa: E402
     generate_distinct_hex,
     overlay_multi_channels,
@@ -99,8 +111,13 @@ from src.spatialscope_analysis.visualization import (  # noqa: E402
 
 
 PROTOCOL_VERSION = 1
-ENGINE_VERSION = "1.2.2"
+ENGINE_VERSION = "1.2.3"
 PROTOCOL_STDOUT = sys.stdout
+
+REGION_CONTOUR_DOWNSAMPLES = (1, 2, 4, 8)
+REGION_MORPHOLOGY_MAX_UM = 80.0
+REGION_LINE_WIDTH_MIN = 0.5
+REGION_LINE_WIDTH_MAX = 10.0
 
 SECTION_OUTPUT_SUBDIRS = {
     "config": "00_config",
@@ -236,6 +253,7 @@ def _normalized_number(
     label: str,
     *,
     minimum: float = 0.0,
+    maximum: float | None = None,
     strictly_positive: bool = False,
     integer: bool = False,
 ) -> float | int:
@@ -248,6 +266,8 @@ def _normalized_number(
         raise ValueError(f"{label} must be greater than {minimum:g}")
     if not strictly_positive and numeric < minimum:
         raise ValueError(f"{label} must be at least {minimum:g}")
+    if maximum is not None and numeric > maximum:
+        raise ValueError(f"{label} must be at most {maximum:g}")
     if integer:
         if not numeric.is_integer():
             raise ValueError(f"{label} must be an integer")
@@ -337,6 +357,56 @@ def _save_figure_preview(figure: plt.Figure, path: Path, *, dpi: int = 110) -> P
     return path
 
 
+def _latest_existing_file(paths: Iterable[Path]) -> Path | None:
+    existing = [Path(path) for path in paths if Path(path).is_file()]
+    if not existing:
+        return None
+    return max(existing, key=lambda path: (path.stat().st_mtime_ns, path.name))
+
+
+def _distribution_restore_preview_paths(distribution_dir: Path) -> Dict[str, Path]:
+    distribution_dir = Path(distribution_dir)
+    band_map = _latest_existing_file(
+        (distribution_dir / "01_region_masks").glob("region_bands__*__band_map.png")
+    )
+    density_plot = _latest_existing_file(
+        (distribution_dir / "02_cell_density").glob("cell_density__*__plot.png")
+    )
+    previews: Dict[str, Path] = {}
+    if band_map is not None:
+        previews["distribution"] = band_map
+        previews["distributionBandMap"] = band_map
+    if density_plot is not None:
+        previews["distributionDensity"] = density_plot
+    return previews
+
+
+def _distribution_result_preview_contract(
+    region_masks: Dict[str, Any],
+    density: Dict[str, Any],
+) -> Dict[str, str | None]:
+    region_paths = region_masks.get("saved_paths", {}) if isinstance(region_masks, dict) else {}
+    density_paths = density.get("saved_paths", {}) if isinstance(density, dict) else {}
+    band_map = str(region_paths.get("png") or "").strip() or None
+    density_plot = str(density_paths.get("png") or "").strip() or None
+    return {
+        "previewPath": band_map or density_plot,
+        "bandMapPreviewPath": band_map,
+        "densityPlotPreviewPath": density_plot,
+    }
+
+
+def _distribution_config_for_output(output_folder: Path):
+    """Load plotting settings while keeping writes inside the active output root."""
+    resolved_output = Path(output_folder).expanduser().resolve()
+    distribution_config = read_distribution_config(resolved_output)
+    # Saved projects can be copied or moved. The serialized save_dir records the
+    # old location, but a restore explicitly selects resolved_output as the
+    # active project root and every new artifact must remain beneath it.
+    distribution_config.save_dir = resolved_output
+    return distribution_config
+
+
 class NativeEngine:
     def __init__(self, compute_runtime: ComputeRuntime | None = None) -> None:
         gpu_mode = str(os.environ.get("SPATIALSCOPE_GPU_MODE", "auto")).strip().lower()
@@ -387,6 +457,10 @@ class NativeEngine:
             "apply_recommendation": self.apply_recommendation,
             "neighborhood": self.neighborhood,
             "region": self.region,
+            "region_preview": self.region_preview,
+            "region_manual_preview": self.region_manual_preview,
+            "region_manual_save": self.region_manual_save,
+            "region_custom_export": self.region_custom_export,
             "cell_distribution": self.cell_distribution,
             "distance": self.distance,
             "outputs": self.outputs,
@@ -418,6 +492,10 @@ class NativeEngine:
                 "apply_recommendation",
                 "neighborhood",
                 "region",
+                "region_preview",
+                "region_manual_preview",
+                "region_manual_save",
+                "region_custom_export",
                 "cell_distribution",
                 "distance",
                 "outputs",
@@ -589,6 +667,7 @@ class NativeEngine:
             label: str,
             *,
             minimum: float = 0.0,
+            maximum: float | None = None,
             strictly_positive: bool = False,
             integer: bool = False,
         ) -> float | int:
@@ -596,6 +675,7 @@ class NativeEngine:
                 value,
                 label,
                 minimum=minimum,
+                maximum=maximum,
                 strictly_positive=strictly_positive,
                 integer=integer,
             )
@@ -649,14 +729,37 @@ class NativeEngine:
                 use_type_colors = source.get("useTypeColors")
                 if not isinstance(use_type_colors, bool):
                     raise ValueError("region.useTypeColors must be a boolean")
+                line_style = text(source.get("lineStyle"), "region.lineStyle").strip()
+                if line_style not in {"-", "--", "-.", ":"}:
+                    raise ValueError("region.lineStyle must be one of '-', '--', '-.', or ':'")
+                boundary_color = text(source.get("boundaryColor"), "region.boundaryColor").strip()
+                if not mcolors.is_color_like(boundary_color):
+                    raise ValueError("region.boundaryColor must be a valid color value")
+                contour_downsample = number(
+                    source.get("contourDownsample"),
+                    "region.contourDownsample",
+                    strictly_positive=True,
+                    integer=True,
+                )
+                if contour_downsample not in REGION_CONTOUR_DOWNSAMPLES:
+                    choices = ", ".join(str(value) for value in REGION_CONTOUR_DOWNSAMPLES)
+                    raise ValueError(f"region.contourDownsample must be one of {choices}")
                 validated["region"] = {
                     "selectedTypes": string_list(
                         source.get("selectedTypes"),
                         "region.selectedTypes",
                         allowed=available_types,
                     ),
-                    "closeUm": number(source.get("closeUm"), "region.closeUm"),
-                    "dilateUm": number(source.get("dilateUm"), "region.dilateUm"),
+                    "closeUm": number(
+                        source.get("closeUm"),
+                        "region.closeUm",
+                        maximum=REGION_MORPHOLOGY_MAX_UM,
+                    ),
+                    "dilateUm": number(
+                        source.get("dilateUm"),
+                        "region.dilateUm",
+                        maximum=REGION_MORPHOLOGY_MAX_UM,
+                    ),
                     "minAreaUm2": number(source.get("minAreaUm2"), "region.minAreaUm2"),
                     "minCells": number(
                         source.get("minCells"),
@@ -664,19 +767,15 @@ class NativeEngine:
                         minimum=1.0,
                         integer=True,
                     ),
-                    "contourDownsample": number(
-                        source.get("contourDownsample"),
-                        "region.contourDownsample",
-                        strictly_positive=True,
-                        integer=True,
-                    ),
+                    "contourDownsample": contour_downsample,
                     "lineWidth": number(
                         source.get("lineWidth"),
                         "region.lineWidth",
-                        strictly_positive=True,
+                        minimum=REGION_LINE_WIDTH_MIN,
+                        maximum=REGION_LINE_WIDTH_MAX,
                     ),
-                    "lineStyle": text(source.get("lineStyle"), "region.lineStyle"),
-                    "boundaryColor": text(source.get("boundaryColor"), "region.boundaryColor"),
+                    "lineStyle": line_style,
+                    "boundaryColor": boundary_color,
                     "useTypeColors": use_type_colors,
                 }
             except ValueError as error:
@@ -1030,12 +1129,13 @@ class NativeEngine:
             "cellTypes": assignment_dir / "celltype_assignment_preview.png",
             "neighborhood": neighborhood_dir / "neighborhood_preview.png",
             "region": region_dir / "region_analysis_preview.png",
+            "regionOverlay": region_dir / "region_analysis_preview__overlay.png",
+            "regionMask": region_dir / "region_analysis_preview__mask.png",
             "distance_nearest": distance_dir / "nearest_distance_preview.png",
             "distance_boundary": distance_dir / "boundary_distance_preview.png",
         }
-        distribution_previews = sorted(distribution_dir.rglob("*.png")) if distribution_dir.is_dir() else []
-        if distribution_previews:
-            preview_paths["distribution"] = distribution_previews[0]
+        if distribution_dir.is_dir():
+            preview_paths.update(_distribution_restore_preview_paths(distribution_dir))
 
         _progress(request_id, 0.30, "Restoring saved nuclei and cell results")
         nuclei_params: Dict[str, Any] = {}
@@ -1141,32 +1241,15 @@ class NativeEngine:
             except Exception as error:
                 warnings.append(f"Could not restore saved cell type assignment: {error}")
 
-        boundaries: list[Dict[str, str]] = []
+        boundaries: list[Dict[str, Any]] = []
+        region_records: list[Dict[str, Any]] = []
         registry_path = region_dir / "boundary_mask_registry.json"
         if stage_allowed("region") and self.assignment_result is not None and registry_path.is_file():
             try:
-                registry = json.loads(registry_path.read_text(encoding="utf-8"))
-                records = registry.get("entries", []) if isinstance(registry, dict) else registry
-                region_root = region_dir.resolve()
-                mask_paths: Dict[str, Path] = {}
-                for item in records if isinstance(records, list) else []:
-                    if not isinstance(item, dict):
-                        continue
-                    relative = str(item.get("mask_path") or "").strip()
-                    if not relative:
-                        continue
-                    candidate = (region_dir / relative).resolve()
-                    try:
-                        candidate.relative_to(region_root)
-                    except ValueError:
-                        continue
-                    if not candidate.is_file():
-                        continue
-                    label = str(item.get("display_name") or item.get("mask_key") or candidate.stem)
-                    mask_paths[label] = candidate
-                    boundaries.append({"label": label, "path": str(candidate)})
-                if mask_paths:
-                    self.region_result = {"saved_paths": {"mask_paths": mask_paths}}
+                region_records = self._load_region_records(warnings)
+                if region_records:
+                    self._set_region_records(region_records)
+                    _, _, boundaries = self._region_catalog(region_records)
             except Exception as error:
                 warnings.append(f"Could not restore saved region boundaries: {error}")
 
@@ -1260,6 +1343,12 @@ class NativeEngine:
             boundaries,
             warnings,
         )
+        regions: list[Dict[str, Any]] = []
+        dominant_counts: list[Dict[str, Any]] = []
+        if region_records:
+            region_records = self._load_region_records([])
+            self._set_region_records(region_records)
+            regions, dominant_counts, boundaries = self._region_catalog(region_records)
         self._persist_workflow_state()
         if neighborhood_complete:
             self.neighborhood_result = {}
@@ -1273,7 +1362,11 @@ class NativeEngine:
             "cellTypes": "cellTypes",
             "neighborhood": "neighborhood",
             "region": "region",
+            "regionOverlay": "region",
+            "regionMask": "region",
             "distribution": "distribution",
+            "distributionBandMap": "distribution",
+            "distributionDensity": "distribution",
             "distance_nearest": "distance",
             "distance_boundary": "distance",
         }
@@ -1299,6 +1392,10 @@ class NativeEngine:
             if self._output_record_is_current(str(record.get("relativePath") or ""))
         ]
         _progress(request_id, 1.0, "Saved SpatialScope results restored")
+        if self.assignment_result is not None:
+            restored_height, restored_width = (int(value) for value in self.assignment_result["celltype_mask"].shape)
+        else:
+            restored_width, restored_height = 0, 0
         return {
             "restored": True,
             "configuration": {
@@ -1318,6 +1415,7 @@ class NativeEngine:
             },
             "workflow": workflow,
             "analysisParameters": copy.deepcopy(self.analysis_parameters),
+            "regionParameters": copy.deepcopy(self.analysis_parameters.get("region", {})),
             "previewPaths": restored_preview_paths,
             "nucleiParameters": self.pending_parameters["nuclei"] or nuclei_params,
             "assignmentParameters": self.pending_parameters["assignment"] or assignment_params,
@@ -1325,7 +1423,11 @@ class NativeEngine:
             "assignmentRecommendation": assignment_recommendation,
             "cellTypes": self.celltype_config,
             "resolvedCellTypes": resolved_cell_types,
+            "regions": regions,
+            "dominantCounts": dominant_counts,
             "boundaries": boundaries,
+            "width": restored_width,
+            "height": restored_height,
             "files": files,
             "artifacts": artifacts,
             "warnings": warnings,
@@ -1352,6 +1454,8 @@ class NativeEngine:
             pixel_size_um=config.pixel_size_um,
             save_path=output_dir / "overlay.png",
         )
+        data["overlay_rgb"] = np.asarray(overlay_rgb, dtype=float)
+        data["overlay_clip_high_percentile"] = float(payload.get("clipHighPercentile", 99.8))
         _save_figure_preview(overlay_figure, output_dir / "overlay_preview.png", dpi=110)
 
         _progress(request_id, 0.70, "Rendering split channels")
@@ -1763,27 +1867,50 @@ class NativeEngine:
             "artifacts": _artifact_manifest(Path(config.save_dir), output_dir),
         }
 
-    def region(self, request_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        config = self._require_config()
+    def _present_region_cell_types(self) -> list[str]:
         if self.assignment_result is None:
-            raise RuntimeError("Run cell type assignment before region analysis.")
-        present_types = [
+            return []
+        present = {
             str(value)
-            for value in self.assignment_result["df_cells"]["celltype"].astype(str).unique().tolist()
+            for value in self.assignment_result["df_cells"]["celltype"].astype(str).tolist()
             if str(value) not in {"Unassigned", "Ambiguous"}
-        ]
-        raw_selected_types = payload.get("selectedTypes")
-        selected_types = _normalized_string_list(
-            present_types[:1] if raw_selected_types is None else raw_selected_types,
-            "Region selectedTypes",
-            allowed=set(present_types),
+        }
+        configured = [str(item.get("name") or "") for item in self.celltype_config]
+        ordered = [name for name in configured if name in present]
+        ordered.extend(sorted(present.difference(ordered), key=str.casefold))
+        return ordered
+
+    def _normalize_region_parameters(
+        self,
+        payload: Dict[str, Any],
+        selected_types: Sequence[str],
+        *,
+        inherit_saved: bool = False,
+    ) -> tuple[RegionParams, Dict[str, Any]]:
+        saved = self.analysis_parameters.get("region") if inherit_saved else None
+        base = saved if isinstance(saved, dict) else {}
+
+        def value(key: str, fallback: Any) -> Any:
+            return payload[key] if key in payload else base.get(key, fallback)
+
+        close_um = float(
+            _normalized_number(
+                value("closeUm", 15.0),
+                "Region closeUm",
+                maximum=REGION_MORPHOLOGY_MAX_UM,
+            )
         )
-        close_um = float(_normalized_number(payload.get("closeUm", 15.0), "Region closeUm"))
-        dilate_um = float(_normalized_number(payload.get("dilateUm", 10.0), "Region dilateUm"))
-        min_area_um2 = float(_normalized_number(payload.get("minAreaUm2", 20000.0), "Region minAreaUm2"))
+        dilate_um = float(
+            _normalized_number(
+                value("dilateUm", 10.0),
+                "Region dilateUm",
+                maximum=REGION_MORPHOLOGY_MAX_UM,
+            )
+        )
+        min_area_um2 = float(_normalized_number(value("minAreaUm2", 20000.0), "Region minAreaUm2"))
         min_cells = int(
             _normalized_number(
-                payload.get("minCells", 5),
+                value("minCells", 5),
                 "Region minCells",
                 minimum=1.0,
                 integer=True,
@@ -1791,30 +1918,35 @@ class NativeEngine:
         )
         contour_downsample = int(
             _normalized_number(
-                payload.get("contourDownsample", 2),
+                value("contourDownsample", 2),
                 "Region contourDownsample",
                 strictly_positive=True,
                 integer=True,
             )
         )
+        if contour_downsample not in REGION_CONTOUR_DOWNSAMPLES:
+            choices = ", ".join(str(value) for value in REGION_CONTOUR_DOWNSAMPLES)
+            raise ValueError(f"Region contourDownsample must be one of {choices}.")
         line_width = float(
             _normalized_number(
-                payload.get("lineWidth", 2.0),
+                value("lineWidth", 2.0),
                 "Region lineWidth",
-                strictly_positive=True,
+                minimum=REGION_LINE_WIDTH_MIN,
+                maximum=REGION_LINE_WIDTH_MAX,
             )
         )
-        line_style = payload.get("lineStyle", "--")
-        boundary_color = payload.get("boundaryColor", "#A1D99B")
-        use_type_colors = payload.get("useTypeColors", False)
-        if not isinstance(line_style, str) or not line_style.strip():
-            raise ValueError("Region lineStyle must be a nonempty string.")
-        if not isinstance(boundary_color, str) or not boundary_color.strip():
-            raise ValueError("Region boundaryColor must be a nonempty string.")
+        line_style = value("lineStyle", "-")
+        boundary_color = value("boundaryColor", "#A1D99B")
+        use_type_colors = value("useTypeColors", False)
+        if not isinstance(line_style, str) or line_style.strip() not in {"-", "--", "-.", ":"}:
+            raise ValueError("Region lineStyle must be one of '-', '--', '-.', or ':'.")
+        if not isinstance(boundary_color, str) or not boundary_color.strip() or not mcolors.is_color_like(boundary_color.strip()):
+            raise ValueError("Region boundaryColor must be a valid color value.")
         if not isinstance(use_type_colors, bool):
             raise ValueError("Region useTypeColors must be a boolean.")
+
         params = RegionParams(
-            selected_types=selected_types,
+            selected_types=list(selected_types),
             close_um=close_um,
             dilate_um=dilate_um,
             min_area_um2=min_area_um2,
@@ -1825,6 +1957,639 @@ class NativeEngine:
             boundary_color=boundary_color.strip(),
             use_type_colors=use_type_colors,
         )
+        normalized = {
+            "selectedTypes": list(params.selected_types),
+            "closeUm": float(params.close_um),
+            "dilateUm": float(params.dilate_um),
+            "minAreaUm2": float(params.min_area_um2),
+            "minCells": int(params.min_cells),
+            "contourDownsample": int(params.contour_downsample),
+            "lineWidth": float(params.line_width),
+            "lineStyle": str(params.line_style),
+            "boundaryColor": str(params.boundary_color),
+            "useTypeColors": bool(params.use_type_colors),
+        }
+        return params, normalized
+
+    @staticmethod
+    def _region_source_type(record: Dict[str, Any]) -> str:
+        explicit = str(record.get("source_type") or "").strip().lower()
+        if explicit in {"computational", "manual", "adjusted"}:
+            return explicit
+        source = str(record.get("source") or "").strip().lower()
+        if source == "manual_roi_selection":
+            return "manual"
+        if source == "manual_boundary_adjustment":
+            return "adjusted"
+        return "computational"
+
+    @staticmethod
+    def _stable_region_id(relative_path: str, record: Dict[str, Any]) -> str:
+        explicit = str(record.get("id") or "").strip()
+        if re.fullmatch(r"roi_[0-9a-fA-F]{16}", explicit):
+            return explicit.lower()
+        identity = "|".join(
+            [
+                str(record.get("source") or ""),
+                str(record.get("group_name") or ""),
+                str(record.get("mask_key") or ""),
+                str(relative_path),
+            ]
+        )
+        return f"roi_{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:16]}"
+
+    def _load_region_records(self, warnings: list[str] | None = None) -> list[Dict[str, Any]]:
+        warnings = warnings if warnings is not None else []
+        config = self._require_config()
+        if self.assignment_result is None:
+            return []
+        shape = tuple(int(value) for value in self.assignment_result["celltype_mask"].shape)
+        region_dir = Path(config.save_dir) / SECTION_OUTPUT_SUBDIRS["region_analysis"]
+        registry_path = region_dir / "boundary_mask_registry.json"
+        raw_records: list[Dict[str, Any]] = []
+        if registry_path.is_file():
+            try:
+                payload = json.loads(registry_path.read_text(encoding="utf-8"))
+                records = payload.get("entries", []) if isinstance(payload, dict) else payload
+                if isinstance(records, list):
+                    raw_records = [dict(item) for item in records if isinstance(item, dict)]
+            except Exception as error:
+                warnings.append(f"Could not read the Region boundary registry: {error}")
+        if not raw_records and isinstance(self.region_result, dict):
+            for label, path in (self.region_result.get("saved_paths", {}).get("mask_paths", {}) or {}).items():
+                raw_records.append(
+                    {
+                        "mask_path": str(Path(path).name),
+                        "display_name": str(label),
+                        "mask_key": str(label),
+                        "source": "computational_roi_identification",
+                    }
+                )
+
+        region_root = region_dir.resolve()
+        color_by_type = {
+            str(item.get("name") or ""): str(item.get("color_hex") or "#A1D99B")
+            for item in self.celltype_config
+        }
+        saved_parameters = self.analysis_parameters.get("region")
+        saved_parameters = saved_parameters if isinstance(saved_parameters, dict) else {}
+        default_color = str(saved_parameters.get("boundaryColor") or "#A1D99B")
+        use_type_colors = bool(saved_parameters.get("useTypeColors", False))
+        loaded: list[Dict[str, Any]] = []
+        seen_paths: set[str] = set()
+        for raw in raw_records:
+            relative = str(raw.get("mask_path") or "").strip().replace("\\", "/")
+            if not relative or relative in seen_paths:
+                continue
+            candidate = (region_dir / relative).resolve()
+            try:
+                candidate.relative_to(region_root)
+            except ValueError:
+                warnings.append(f"Ignored a Region boundary outside the Region output folder: {relative}")
+                continue
+            if not candidate.is_file():
+                warnings.append(f"Ignored a missing Region boundary mask: {relative}")
+                continue
+            try:
+                mask_array = np.asarray(load_any_tiff(candidate))
+                if mask_array.ndim != 2 or tuple(mask_array.shape) != shape:
+                    raise ValueError(f"expected shape {shape}, got {mask_array.shape}")
+                mask = mask_array.astype(bool)
+                if not np.any(mask):
+                    warnings.append(f"Ignored empty Region boundary mask: {raw.get('display_name') or candidate.stem}")
+                    continue
+            except Exception as error:
+                warnings.append(f"Ignored unreadable Region boundary mask {relative}: {error}")
+                continue
+
+            source_type = self._region_source_type(raw)
+            mask_key = str(raw.get("mask_key") or raw.get("display_name") or candidate.stem)
+            stored_color = str(raw.get("color_hex") or "").strip()
+            if stored_color and not mcolors.is_color_like(stored_color):
+                stored_color = ""
+            color_hex = stored_color or (
+                color_by_type.get(mask_key, default_color)
+                if source_type == "computational" and use_type_colors
+                else default_color
+            )
+            original_path: Path | None = None
+            original_relative = str(raw.get("original_mask_path") or "").strip().replace("\\", "/")
+            if original_relative:
+                possible_original = (region_dir / original_relative).resolve()
+                try:
+                    possible_original.relative_to(region_root)
+                    if possible_original.is_file():
+                        original_path = possible_original
+                except ValueError:
+                    original_path = None
+            loaded.append(
+                {
+                    "id": self._stable_region_id(relative, raw),
+                    "label": str(raw.get("display_name") or mask_key or candidate.stem).strip() or candidate.stem,
+                    "path": candidate,
+                    "relativePath": relative,
+                    "sourceType": source_type,
+                    "maskKey": mask_key,
+                    "colorHex": mcolors.to_hex(color_hex, keep_alpha=False),
+                    "mask": mask,
+                    "modifiedUtc": float(candidate.stat().st_mtime),
+                    "originalPath": original_path,
+                    "originalLabel": str(raw.get("original_label") or "").strip() or None,
+                    "registry": raw,
+                }
+            )
+            seen_paths.add(relative)
+
+        latest_computational: dict[str, Dict[str, Any]] = {}
+        retained: list[Dict[str, Any]] = []
+        for record in loaded:
+            if record["sourceType"] != "computational":
+                retained.append(record)
+                continue
+            key = str(record["label"]).casefold()
+            previous = latest_computational.get(key)
+            if previous is None or (record["modifiedUtc"], record["relativePath"]) > (
+                previous["modifiedUtc"],
+                previous["relativePath"],
+            ):
+                latest_computational[key] = record
+        if len(latest_computational) < sum(record["sourceType"] == "computational" for record in loaded):
+            warnings.append("Older duplicate computational Region boundaries were hidden in favor of the newest saved mask.")
+        retained.extend(latest_computational.values())
+        retained.sort(key=lambda item: (str(item["sourceType"]), str(item["label"]).casefold(), str(item["id"])))
+
+        used_labels: set[str] = set()
+        for record in retained:
+            base_label = str(record["label"])
+            label = base_label
+            suffix = 2
+            while label.casefold() in used_labels:
+                qualifier = str(record["sourceType"]).capitalize()
+                label = f"{base_label} ({qualifier})" if suffix == 2 else f"{base_label} ({qualifier} {suffix})"
+                suffix += 1
+            record["label"] = label
+            used_labels.add(label.casefold())
+        return retained
+
+    def _region_catalog(
+        self,
+        records: Sequence[Dict[str, Any]],
+    ) -> tuple[list[Dict[str, Any]], list[Dict[str, Any]], list[Dict[str, Any]]]:
+        config = self._require_config()
+        if self.assignment_result is None:
+            return [], [], []
+        df_cells = self.assignment_result["df_cells"]
+        shape = self.assignment_result["celltype_mask"].shape
+        height, width = int(shape[0]), int(shape[1])
+        cy = np.clip(np.rint(df_cells["centroid_y_px"].to_numpy(float)).astype(int), 0, height - 1)
+        cx = np.clip(np.rint(df_cells["centroid_x_px"].to_numpy(float)).astype(int), 0, width - 1)
+        cell_types = df_cells["celltype"].astype(str).to_numpy()
+        available_types = self._present_region_cell_types()
+        type_order = {name: index for index, name in enumerate(available_types)}
+        type_colors = {
+            str(item.get("name") or ""): mcolors.to_hex(str(item.get("color_hex") or "#A1D99B"))
+            for item in self.celltype_config
+        }
+        px_area_um2 = float(config.pixel_size_um[0]) * float(config.pixel_size_um[1])
+        rows: list[Dict[str, Any]] = []
+        dominant_region_counts: dict[str, int] = {}
+        boundaries: list[Dict[str, Any]] = []
+        for record in records:
+            mask = np.asarray(record["mask"], dtype=bool)
+            inside_types = cell_types[mask[cy, cx]]
+            counts: Dict[str, int] = {}
+            for name in available_types:
+                count = int(np.count_nonzero(inside_types == name))
+                if count > 0:
+                    counts[name] = count
+            dominant_type: str | None = None
+            if counts:
+                dominant_type = min(
+                    counts,
+                    key=lambda name: (-counts[name], type_order.get(name, len(type_order)), name.casefold()),
+                )
+                dominant_region_counts[dominant_type] = dominant_region_counts.get(dominant_type, 0) + 1
+            rows.append(
+                {
+                    "id": str(record["id"]),
+                    "label": str(record["label"]),
+                    "sourceType": str(record["sourceType"]),
+                    "dominantType": dominant_type,
+                    "cellCount": int(sum(counts.values())),
+                    "areaUm2": float(np.count_nonzero(mask) * px_area_um2),
+                    "colorHex": str(record["colorHex"]),
+                    "countsByType": counts,
+                }
+            )
+            boundaries.append(
+                {
+                    "id": str(record["id"]),
+                    "label": str(record["label"]),
+                    "path": str(record["path"]),
+                    "sourceType": str(record["sourceType"]),
+                }
+            )
+        dominant_counts = [
+            {
+                "name": name,
+                "count": int(count),
+                "colorHex": type_colors.get(name, "#A1D99B"),
+            }
+            for name, count in sorted(
+                dominant_region_counts.items(),
+                key=lambda item: (-item[1], type_order.get(item[0], len(type_order)), item[0].casefold()),
+            )
+        ]
+        return rows, dominant_counts, boundaries
+
+    def _region_displayed_cell_count(
+        self,
+        records: Sequence[Dict[str, Any]],
+        selected_cell_types: Sequence[str],
+    ) -> int:
+        """Count unique selected cells whose centroids fall in any displayed ROI."""
+        if self.assignment_result is None or not records or not selected_cell_types:
+            return 0
+        shape = tuple(int(value) for value in self.assignment_result["celltype_mask"].shape)
+        displayed_mask = np.zeros(shape, dtype=bool)
+        for record in records:
+            mask = np.asarray(record["mask"], dtype=bool)
+            if mask.shape != shape:
+                raise ValueError(
+                    f"Region boundary {record.get('label') or record.get('id') or '<unknown>'} "
+                    f"has shape {mask.shape}, expected {shape}."
+                )
+            displayed_mask |= mask
+
+        df_cells = self.assignment_result["df_cells"]
+        height, width = shape
+        cy = np.clip(np.rint(df_cells["centroid_y_px"].to_numpy(float)).astype(int), 0, height - 1)
+        cx = np.clip(np.rint(df_cells["centroid_x_px"].to_numpy(float)).astype(int), 0, width - 1)
+        selected = df_cells["celltype"].astype(str).isin(selected_cell_types).to_numpy(dtype=bool)
+        return int(np.count_nonzero(selected & displayed_mask[cy, cx]))
+
+    @staticmethod
+    def _boundary_cell_type_mode(payload: Dict[str, Any]) -> str:
+        raw_mode = payload.get("boundaryCellTypeMode", "content")
+        if not isinstance(raw_mode, str) or raw_mode.strip().lower() not in {"content", "source"}:
+            raise ValueError("Region boundaryCellTypeMode must be 'content' or 'source'.")
+        return raw_mode.strip().lower()
+
+    def _preferred_region_cell_type(
+        self,
+        record: Dict[str, Any],
+        row: Dict[str, Any],
+        record_rows: Dict[str, tuple[Dict[str, Any], Dict[str, Any]]],
+        seen_ids: set[str] | None = None,
+    ) -> str | None:
+        available = self._present_region_cell_types()
+        available_by_fold = {name.casefold(): name for name in available}
+
+        def canonical(value: Any) -> str | None:
+            text = str(value or "").strip()
+            if not text or text in {"Unassigned", "Ambiguous"}:
+                return None
+            direct = available_by_fold.get(text.casefold())
+            if direct is not None:
+                return direct
+            for name in available:
+                if text.casefold().startswith(f"{name} (".casefold()):
+                    return name
+            return None
+
+        record_id = str(record.get("id") or "")
+        visited = set(seen_ids or set())
+        if record_id in visited:
+            return canonical(row.get("dominantType"))
+        visited.add(record_id)
+        registry = record.get("registry") if isinstance(record.get("registry"), dict) else {}
+        source_type = str(record.get("sourceType") or "")
+
+        direct_candidates: list[Any] = []
+        if source_type == "computational":
+            direct_candidates.extend((record.get("maskKey"), record.get("label")))
+        else:
+            direct_candidates.extend(
+                (
+                    registry.get("target_cell_type"),
+                    registry.get("original_source_type"),
+                )
+            )
+        for candidate in direct_candidates:
+            resolved = canonical(candidate)
+            if resolved is not None:
+                return resolved
+
+        target_ids = [registry.get("target_boundary_id"), registry.get("original_region_id")]
+        target_labels = [
+            registry.get("target_boundary_label"),
+            registry.get("original_label"),
+            registry.get("target_type"),
+        ]
+        for target_id in target_ids:
+            target_pair = record_rows.get(str(target_id or ""))
+            if target_pair is not None and str(target_pair[0].get("id")) != record_id:
+                resolved = self._preferred_region_cell_type(target_pair[0], target_pair[1], record_rows, visited)
+                if resolved is not None:
+                    return resolved
+        for target_label in target_labels:
+            label_text = str(target_label or "").strip()
+            if not label_text:
+                continue
+            resolved = canonical(label_text)
+            if resolved is not None:
+                return resolved
+            target_pair = next(
+                (
+                    pair
+                    for pair in record_rows.values()
+                    if str(pair[0].get("label") or "") == label_text
+                    or str((pair[0].get("registry") or {}).get("display_name") or "") == label_text
+                ),
+                None,
+            )
+            if target_pair is not None and str(target_pair[0].get("id")) != record_id:
+                resolved = self._preferred_region_cell_type(target_pair[0], target_pair[1], record_rows, visited)
+                if resolved is not None:
+                    return resolved
+
+        raw_seed_types = registry.get("seed_cell_types")
+        if isinstance(raw_seed_types, str):
+            raw_seed_types = [raw_seed_types]
+        if isinstance(raw_seed_types, list):
+            for seed_type in raw_seed_types:
+                resolved = canonical(seed_type)
+                if resolved is not None:
+                    return resolved
+        for candidate in (record.get("maskKey"), record.get("label"), row.get("dominantType")):
+            resolved = canonical(candidate)
+            if resolved is not None:
+                return resolved
+        return None
+
+    def _filter_region_records_by_cell_types(
+        self,
+        records: Sequence[Dict[str, Any]],
+        selected_cell_types: Sequence[str],
+        mode: str,
+    ) -> tuple[list[Dict[str, Any]], list[Dict[str, Any]], list[Dict[str, Any]], list[Dict[str, Any]]]:
+        rows, _, _ = self._region_catalog(records)
+        row_by_id = {str(row["id"]): row for row in rows}
+        record_rows = {
+            str(record["id"]): (record, row_by_id[str(record["id"])])
+            for record in records
+            if str(record["id"]) in row_by_id
+        }
+        selected = set(str(value) for value in selected_cell_types)
+        filtered: list[Dict[str, Any]] = []
+        for record in records:
+            row = row_by_id.get(str(record["id"]))
+            if row is None:
+                continue
+            preferred = self._preferred_region_cell_type(record, row, record_rows)
+            source_match = preferred in selected if preferred is not None else False
+            content_match = any(
+                int(count) > 0 and str(cell_type) in selected
+                for cell_type, count in row.get("countsByType", {}).items()
+            )
+            if source_match or (mode == "content" and content_match):
+                filtered.append(record)
+        filtered_rows, dominant_counts, boundaries = self._region_catalog(filtered)
+        return filtered, filtered_rows, dominant_counts, boundaries
+
+    def _set_region_records(self, records: Sequence[Dict[str, Any]]) -> None:
+        result = self.region_result if isinstance(self.region_result, dict) else {}
+        saved_paths = result.get("saved_paths") if isinstance(result.get("saved_paths"), dict) else {}
+        saved_paths["mask_paths"] = {str(item["label"]): Path(item["path"]) for item in records}
+        result["saved_paths"] = saved_paths
+        result["boundary_records"] = list(records)
+        self.region_result = result
+
+    def _select_region_records(
+        self,
+        payload: Dict[str, Any],
+        *,
+        key: str = "selectedBoundaryLabels",
+    ) -> tuple[list[Dict[str, Any]], list[str]]:
+        warnings: list[str] = []
+        records = self._load_region_records(warnings)
+        if not records:
+            raise RuntimeError("Run Region analysis or save a manual ROI before selecting Region boundaries.")
+        by_label = {str(record["label"]): record for record in records}
+        by_id = {str(record["id"]): record for record in records}
+        raw_ids = payload.get("selectedBoundaryIds")
+        if raw_ids is not None:
+            selected_ids = _normalized_string_list(raw_ids, "Region selectedBoundaryIds", allowed=set(by_id))
+            return [by_id[value] for value in selected_ids], warnings
+        raw_labels = payload.get(key)
+        labels = _normalized_string_list(
+            list(by_label) if raw_labels is None else raw_labels,
+            f"Region {key}",
+            allowed=set(by_label),
+        )
+        return [by_label[value] for value in labels], warnings
+
+    def _select_region_cell_types(self, payload: Dict[str, Any], key: str = "selectedCellTypes") -> list[str]:
+        available = self._present_region_cell_types()
+        if not available:
+            raise RuntimeError("No assigned cell types are available for Region analysis.")
+        raw = payload.get(key)
+        return _normalized_string_list(
+            list(available) if raw is None else raw,
+            f"Region {key}",
+            allowed=set(available),
+        )
+
+    @staticmethod
+    def _preview_cache_path(output_dir: Path, prefix: str, preview_key: Any, identity: Dict[str, Any]) -> Path:
+        key = safe_name(str(preview_key or "display"), "display").lower()
+        digest = hashlib.sha256(
+            json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:14]
+        path = output_dir / "previews" / f"{safe_name(prefix, 'region_preview')}__{key}__{digest}.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _write_exact_region_preview(
+        self,
+        records: Sequence[Dict[str, Any]],
+        selected_cell_types: Sequence[str],
+        params: RegionParams,
+        path: Path,
+    ) -> tuple[Path, int, int]:
+        if self.assignment_result is None:
+            raise RuntimeError("Run cell type assignment before creating a Region preview.")
+        masks = {str(record["label"]): np.asarray(record["mask"], dtype=bool) for record in records}
+        boundary_colors = self._region_boundary_colors(records, params)
+        rgb = make_region_canvas_rgb(
+            celltype_mask=self.assignment_result["celltype_mask"],
+            celltype_cfg=self.celltype_config,
+            masks=masks,
+            selected_types=list(masks),
+            display_celltypes=list(selected_cell_types),
+            boundary_color=str(params.boundary_color),
+            use_type_colors=bool(params.use_type_colors),
+            thickness=max(1, int(round(float(params.line_width)))),
+            boundary_colors=boundary_colors,
+            line_style=str(params.line_style),
+        )
+        image = Image.fromarray(np.rint(rgb * 255.0).astype(np.uint8))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(path, format="PNG", optimize=False)
+        return path, int(image.width), int(image.height)
+
+    def _region_boundary_colors(
+        self,
+        records: Sequence[Dict[str, Any]],
+        params: RegionParams,
+    ) -> Dict[str, str] | None:
+        if not params.use_type_colors:
+            return None
+        type_colors = {
+            str(item.get("name") or ""): str(item.get("color_hex") or params.boundary_color)
+            for item in self.celltype_config
+        }
+        rows, _, _ = self._region_catalog(records)
+        row_by_id = {str(row["id"]): row for row in rows}
+        record_rows = {
+            str(record["id"]): (record, row_by_id[str(record["id"])])
+            for record in records
+            if str(record["id"]) in row_by_id
+        }
+        return {
+            str(record["label"]): type_colors.get(
+                str(
+                    self._preferred_region_cell_type(
+                        record,
+                        row_by_id[str(record["id"])],
+                        record_rows,
+                    )
+                    or ""
+                ),
+                str(record["colorHex"]),
+            )
+            for record in records
+            if str(record["id"]) in row_by_id
+        }
+
+    def _multiplex_overlay_rgb(self) -> np.ndarray:
+        config = self._require_config()
+        data = self._ensure_pixels()
+        cached = data.get("overlay_rgb")
+        if isinstance(cached, np.ndarray) and cached.ndim == 3 and cached.shape[2] == 3:
+            return np.asarray(cached, dtype=float)
+        figure, rgb = overlay_multi_channels(
+            data["df_pixels"],
+            data["shapes"],
+            config.image_id,
+            [channel.to_dict() for channel in config.channels],
+            config.overlay_channels,
+            white_channel=config.white_channel,
+            white_weight=config.white_weight,
+            clip_hi=99.8,
+            pixel_size_um=config.pixel_size_um,
+            save_path=None,
+        )
+        plt.close(figure)
+        data["overlay_rgb"] = np.asarray(rgb, dtype=float)
+        data["overlay_clip_high_percentile"] = 99.8
+        return np.asarray(rgb, dtype=float)
+
+    def _write_region_preview_pair(
+        self,
+        records: Sequence[Dict[str, Any]],
+        selected_cell_types: Sequence[str],
+        params: RegionParams,
+        comparison_path: Path,
+    ) -> Dict[str, Any]:
+        if self.assignment_result is None:
+            raise RuntimeError("Run cell type assignment before creating a Region comparison preview.")
+        masks = {str(record["label"]): np.asarray(record["mask"], dtype=bool) for record in records}
+        boundary_colors = self._region_boundary_colors(records, params)
+        render_arguments = {
+            "celltype_cfg": self.celltype_config,
+            "masks": masks,
+            "selected_types": list(masks),
+            "boundary_color": str(params.boundary_color),
+            "use_type_colors": bool(params.use_type_colors),
+            "thickness": max(1, int(round(float(params.line_width)))),
+            "boundary_colors": boundary_colors,
+            "line_style": str(params.line_style),
+        }
+        mask_rgb = make_region_canvas_rgb(
+            celltype_mask=self.assignment_result["celltype_mask"],
+            display_celltypes=list(selected_cell_types),
+            **render_arguments,
+        )
+        overlay_source = self._multiplex_overlay_rgb()
+        if tuple(overlay_source.shape[:2]) != tuple(mask_rgb.shape[:2]):
+            raise RuntimeError(
+                "The multiplex overlay and cell-type mask have different source dimensions: "
+                f"{overlay_source.shape[:2]} != {mask_rgb.shape[:2]}."
+            )
+        overlay_rgb = draw_region_boundaries_rgb(overlay_source, **render_arguments)
+
+        comparison_path.parent.mkdir(parents=True, exist_ok=True)
+        overlay_path = comparison_path.with_name(f"{comparison_path.stem}__overlay.png")
+        mask_path = comparison_path.with_name(f"{comparison_path.stem}__mask.png")
+        overlay_image = Image.fromarray(np.rint(overlay_rgb * 255.0).astype(np.uint8))
+        mask_image = Image.fromarray(np.rint(mask_rgb * 255.0).astype(np.uint8))
+        overlay_image.save(overlay_path, format="PNG", optimize=False)
+        mask_image.save(mask_path, format="PNG", optimize=False)
+        gap = 24
+        comparison_image = Image.new(
+            "RGB",
+            (int(overlay_image.width + mask_image.width + gap), int(max(overlay_image.height, mask_image.height))),
+            (0, 0, 0),
+        )
+        comparison_image.paste(overlay_image, (0, 0))
+        comparison_image.paste(mask_image, (int(overlay_image.width + gap), 0))
+        comparison_image.save(comparison_path, format="PNG", optimize=False)
+        return {
+            "overlayPreviewPath": overlay_path,
+            "maskPreviewPath": mask_path,
+            "comparisonPreviewPath": comparison_path,
+            "width": int(mask_image.width),
+            "height": int(mask_image.height),
+            "comparisonWidth": int(comparison_image.width),
+            "comparisonHeight": int(comparison_image.height),
+        }
+
+    @staticmethod
+    def _write_png_backed_svg(png_path: Path, svg_path: Path, title: str) -> Path:
+        """Write a standards-based SVG wrapper that preserves the exact PNG rendering."""
+        png_payload = png_path.read_bytes()
+        if not png_payload.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise ValueError(f"Region SVG source is not a PNG file: {png_path}")
+        with Image.open(io.BytesIO(png_payload)) as image:
+            width, height = int(image.width), int(image.height)
+        encoded = base64.b64encode(png_payload).decode("ascii")
+        escaped_title = html.escape(title, quote=False)
+        svg = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+            f'viewBox="0 0 {width} {height}" role="img">\n'
+            f"  <title>{escaped_title}</title>\n"
+            f'  <image x="0" y="0" width="{width}" height="{height}" preserveAspectRatio="none" '
+            f'href="data:image/png;base64,{encoded}"/>\n'
+            "</svg>\n"
+        )
+        svg_path.parent.mkdir(parents=True, exist_ok=True)
+        svg_path.write_text(svg, encoding="utf-8", newline="\n")
+        return svg_path
+
+    def region(self, request_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        config = self._require_config()
+        if self.assignment_result is None:
+            raise RuntimeError("Run cell type assignment before region analysis.")
+        present_types = self._present_region_cell_types()
+        raw_selected_types = payload.get("selectedTypes")
+        selected_types = _normalized_string_list(
+            present_types[:1] if raw_selected_types is None else raw_selected_types,
+            "Region selectedTypes",
+            allowed=set(present_types),
+        )
+        params, normalized_parameters = self._normalize_region_parameters(payload, selected_types)
         self._invalidate_workflow_from("region")
         _progress(request_id, 0.15, "Computing region masks")
         output_dir = _section_dir(config, "region_analysis")
@@ -1837,31 +2602,655 @@ class NativeEngine:
             params=params,
             save_outputs=True,
         )
-        preview_path = self._save_first_result_figure_preview(self.region_result, output_dir / "region_analysis_preview.png")
         _close_figures(self.region_result)
-        boundaries = []
-        for label, path in (self.region_result.get("saved_paths", {}).get("mask_paths", {}) or {}).items():
-            boundaries.append({"label": str(label), "path": str(path)})
         self.distribution_result = None
-        self.analysis_parameters["region"] = {
-            "selectedTypes": list(params.selected_types),
-            "closeUm": float(params.close_um),
-            "dilateUm": float(params.dilate_um),
-            "minAreaUm2": float(params.min_area_um2),
-            "minCells": int(params.min_cells),
-            "contourDownsample": int(params.contour_downsample),
-            "lineWidth": float(params.line_width),
-            "lineStyle": str(params.line_style),
-            "boundaryColor": str(params.boundary_color),
-            "useTypeColors": bool(params.use_type_colors),
-        }
+        computed_masks = self.region_result.get("masks") if isinstance(self.region_result, dict) else None
+        nonempty_computational_count = sum(
+            1
+            for mask in (computed_masks or {}).values()
+            if isinstance(mask, np.ndarray) and np.any(mask)
+        )
+        if nonempty_computational_count <= 0:
+            self.region_result = None
+            raise RuntimeError(
+                "Region analysis produced no nonempty boundary with the current parameters. "
+                "Lower the minimum area or minimum cell count, or increase closing/dilation, then run Region again."
+            )
+        self.analysis_parameters["region"] = normalized_parameters
+        warnings: list[str] = []
+        records = self._load_region_records(warnings)
+        self._set_region_records(records)
+        regions, dominant_counts, boundaries = self._region_catalog(records)
+        preview_pair = self._write_region_preview_pair(
+            records,
+            present_types,
+            params,
+            output_dir / "region_analysis_preview.png",
+        )
         self._mark_workflow_stage("region", invalidate_after=True)
         _progress(request_id, 1.0, "Region analysis complete")
         return {
-            "summary": {"boundaryCount": len(boundaries)},
+            "summary": {"boundaryCount": len(boundaries), "dominantCounts": dominant_counts},
+            "parameters": normalized_parameters,
+            "regions": regions,
+            "dominantCounts": dominant_counts,
             "boundaries": boundaries,
-            "previewPath": str(preview_path) if preview_path else None,
+            "previewPath": str(preview_pair["comparisonPreviewPath"]),
+            "overlayPreviewPath": str(preview_pair["overlayPreviewPath"]),
+            "maskPreviewPath": str(preview_pair["maskPreviewPath"]),
+            "comparisonPreviewPath": str(preview_pair["comparisonPreviewPath"]),
+            "width": int(preview_pair["width"]),
+            "height": int(preview_pair["height"]),
+            "comparisonWidth": int(preview_pair["comparisonWidth"]),
+            "comparisonHeight": int(preview_pair["comparisonHeight"]),
+            "warnings": warnings,
             "artifacts": _artifact_manifest(Path(config.save_dir), output_dir),
+        }
+
+    def region_preview(self, _request_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        config = self._require_config()
+        if self.assignment_result is None:
+            raise RuntimeError("Run cell type assignment before creating a Region preview.")
+        records, warnings = self._select_region_records(payload)
+        requested_boundary_count = len(records)
+        selected_cell_types = self._select_region_cell_types(payload)
+        boundary_cell_type_mode = self._boundary_cell_type_mode(payload)
+        records, regions, dominant_counts, boundaries = self._filter_region_records_by_cell_types(
+            records,
+            selected_cell_types,
+            boundary_cell_type_mode,
+        )
+        selected_cell_count = self._region_displayed_cell_count(records, selected_cell_types)
+        params, normalized_parameters = self._normalize_region_parameters(
+            payload,
+            selected_cell_types,
+            inherit_saved=True,
+        )
+        output_dir = _section_dir(config, "region_analysis")
+        identity = {
+            "boundaries": [str(record["id"]) for record in records],
+            "cellTypes": selected_cell_types,
+            "boundaryCellTypeMode": boundary_cell_type_mode,
+            "parameters": normalized_parameters,
+        }
+        comparison_path = self._preview_cache_path(
+            output_dir,
+            "region_filtered_preview",
+            payload.get("previewKey"),
+            identity,
+        )
+        preview_pair = self._write_region_preview_pair(
+            records,
+            selected_cell_types,
+            params,
+            comparison_path,
+        )
+        preview_path = (
+            preview_pair["maskPreviewPath"]
+            if boundary_cell_type_mode == "source"
+            else preview_pair["comparisonPreviewPath"]
+        )
+        return {
+            "previewPath": str(preview_path),
+            "overlayPreviewPath": str(preview_pair["overlayPreviewPath"]),
+            "maskPreviewPath": str(preview_pair["maskPreviewPath"]),
+            "comparisonPreviewPath": str(preview_pair["comparisonPreviewPath"]),
+            "width": int(preview_pair["width"]),
+            "height": int(preview_pair["height"]),
+            "comparisonWidth": int(preview_pair["comparisonWidth"]),
+            "comparisonHeight": int(preview_pair["comparisonHeight"]),
+            "boundaryCellTypeMode": boundary_cell_type_mode,
+            "boundaryCount": len(records),
+            "cellCount": selected_cell_count,
+            "regions": regions,
+            "dominantCounts": dominant_counts,
+            "boundaries": boundaries,
+            "summary": {
+                "requestedBoundaryCount": requested_boundary_count,
+                "boundaryCount": len(records),
+                "cellTypeCount": len(selected_cell_types),
+                "cellCount": selected_cell_count,
+                "regions": regions,
+                "dominantCounts": dominant_counts,
+                "boundaries": boundaries,
+            },
+            "warnings": warnings,
+        }
+
+    @staticmethod
+    def _manual_polygon_mask(polygons_value: Any, shape: tuple[int, int]) -> np.ndarray:
+        if not isinstance(polygons_value, list) or not polygons_value:
+            raise ValueError("Region manual polygons must contain at least one polygon.")
+        if len(polygons_value) > 256:
+            raise ValueError("Region manual polygons must contain at most 256 polygons.")
+        height, width = int(shape[0]), int(shape[1])
+        canvas = Image.new("1", (width, height), 0)
+        drawing = ImageDraw.Draw(canvas)
+        total_points = 0
+        for polygon_index, polygon_value in enumerate(polygons_value, start=1):
+            points_value = polygon_value.get("points") if isinstance(polygon_value, dict) else polygon_value
+            if not isinstance(points_value, list) or len(points_value) < 3:
+                raise ValueError(f"Region manual polygon {polygon_index} must contain at least three points.")
+            total_points += len(points_value)
+            if total_points > 20000:
+                raise ValueError("Region manual polygons contain too many points.")
+            points: list[tuple[float, float]] = []
+            for point_index, point_value in enumerate(points_value, start=1):
+                if isinstance(point_value, dict):
+                    x_value, y_value = point_value.get("x"), point_value.get("y")
+                elif isinstance(point_value, (list, tuple)) and len(point_value) >= 2:
+                    x_value, y_value = point_value[0], point_value[1]
+                else:
+                    raise ValueError(
+                        f"Region manual polygon {polygon_index} point {point_index} must provide x and y coordinates."
+                    )
+                if isinstance(x_value, bool) or isinstance(y_value, bool) or not isinstance(x_value, (int, float)) or not isinstance(y_value, (int, float)):
+                    raise ValueError(
+                        f"Region manual polygon {polygon_index} point {point_index} coordinates must be numeric."
+                    )
+                x, y = float(x_value), float(y_value)
+                if not math.isfinite(x) or not math.isfinite(y):
+                    raise ValueError(
+                        f"Region manual polygon {polygon_index} point {point_index} coordinates must be finite."
+                    )
+                points.append((x, y))
+            if len({(round(x, 6), round(y, 6)) for x, y in points}) < 3:
+                raise ValueError(f"Region manual polygon {polygon_index} must contain three distinct points.")
+            drawing.polygon(points, fill=1)
+        mask = np.asarray(canvas, dtype=bool)
+        if not np.any(mask):
+            raise ValueError("Region manual polygons do not intersect the source image.")
+        return mask
+
+    def _manual_region_candidate(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        config = self._require_config()
+        if self.assignment_result is None or self.nuclei_result is None:
+            raise RuntimeError("Run final nuclei segmentation and cell type assignment before editing Region boundaries.")
+        mode_value = payload.get("mode", "create")
+        if not isinstance(mode_value, str) or mode_value.strip().lower() not in {"create", "include", "exclude"}:
+            raise ValueError("Region manual mode must be 'create', 'include', or 'exclude'.")
+        mode = mode_value.strip().lower()
+        seed_cell_types = self._select_region_cell_types(payload, key="seedCellTypes")
+        params, normalized_parameters = self._normalize_region_parameters(
+            payload,
+            seed_cell_types,
+            inherit_saved=True,
+        )
+
+        records = self._load_region_records([])
+        target_record: Dict[str, Any] | None = None
+        raw_target = payload.get("targetBoundaryLabel")
+        if mode in {"include", "exclude"}:
+            if not isinstance(raw_target, str) or not raw_target.strip():
+                raise ValueError(f"Region manual {mode} mode requires targetBoundaryLabel.")
+            target_record = next((item for item in records if item["label"] == raw_target.strip()), None)
+            if target_record is None:
+                raise ValueError(f"Region manual target boundary is unavailable: {raw_target.strip()}")
+        elif raw_target not in {None, ""}:
+            raise ValueError("Region manual create mode does not accept targetBoundaryLabel.")
+
+        target_preferred_type: str | None = None
+        if target_record is not None:
+            existing_rows, _, _ = self._region_catalog(records)
+            row_by_id = {str(row["id"]): row for row in existing_rows}
+            record_rows = {
+                str(record["id"]): (record, row_by_id[str(record["id"])])
+                for record in records
+                if str(record["id"]) in row_by_id
+            }
+            target_pair = record_rows.get(str(target_record.get("id") or ""))
+            if target_pair is not None:
+                target_preferred_type = self._preferred_region_cell_type(
+                    target_pair[0],
+                    target_pair[1],
+                    record_rows,
+                )
+
+        shape = tuple(int(value) for value in self.assignment_result["celltype_mask"].shape)
+        polygon_mask = self._manual_polygon_mask(payload.get("polygons"), shape)
+        df_cells = self.assignment_result["df_cells"]
+        required_columns = {"label", "celltype", "centroid_x_px", "centroid_y_px"}
+        if not required_columns.issubset(df_cells.columns):
+            raise RuntimeError(f"Cell assignments must contain columns: {required_columns}")
+        height, width = shape
+        cy = np.clip(np.rint(df_cells["centroid_y_px"].to_numpy(float)).astype(int), 0, height - 1)
+        cx = np.clip(np.rint(df_cells["centroid_x_px"].to_numpy(float)).astype(int), 0, width - 1)
+        labels = df_cells["label"].astype(int).to_numpy()
+        cell_types = df_cells["celltype"].astype(str).to_numpy()
+        polygon_selection = polygon_mask[cy, cx] & np.isin(cell_types, seed_cell_types)
+        selected_seed_labels = {int(value) for value in labels[polygon_selection] if int(value) > 0}
+        if not selected_seed_labels:
+            raise ValueError("The drawn polygon did not select any centroid from the selected seed cell types.")
+
+        base_labels: set[int] = set()
+        if target_record is not None:
+            base_mask = np.asarray(target_record["mask"], dtype=bool)
+            base_labels = {int(value) for value in labels[base_mask[cy, cx]] if int(value) > 0}
+        if mode == "create":
+            result_labels = set(selected_seed_labels)
+        elif mode == "include":
+            result_labels = base_labels | selected_seed_labels
+        else:
+            result_labels = base_labels - selected_seed_labels
+        if not result_labels:
+            raise ValueError("The manual Region edit removed every seed cell from the adjusted ROI.")
+
+        px_area_um2 = float(config.pixel_size_um[0]) * float(config.pixel_size_um[1])
+        candidate_mask = build_region_mask_from_cell_labels(
+            nuclei_labels=np.asarray(self.nuclei_result["labels"]),
+            df_cells=df_cells,
+            selected_labels=sorted(result_labels),
+            close_px=um_to_px_iso(params.close_um, config.pixel_size_um),
+            dilate_px=um_to_px_iso(params.dilate_um, config.pixel_size_um),
+            min_area_px=int(round(float(params.min_area_um2) / max(1e-12, px_area_um2))),
+            min_cells=int(params.min_cells),
+        )
+        if not np.any(candidate_mask):
+            raise ValueError(
+                "The selected cells did not produce a nonempty ROI with the current closing, dilation, area, and cell-count settings."
+            )
+
+        raw_display_name = payload.get("displayName")
+        if raw_display_name is not None and (not isinstance(raw_display_name, str) or not raw_display_name.strip()):
+            raise ValueError("Region manual displayName must be a nonempty string when provided.")
+        display_name = (
+            raw_display_name.strip()
+            if isinstance(raw_display_name, str)
+            else (f"Adjusted {target_record['label']}" if target_record is not None else "Manual ROI")
+        )
+        color_hex = mcolors.to_hex(str(params.boundary_color), keep_alpha=False)
+        identity = {
+            "mode": mode,
+            "targetId": target_record["id"] if target_record is not None else None,
+            "displayName": display_name,
+            "polygons": payload.get("polygons"),
+            "seedCellTypes": seed_cell_types,
+            "parameters": normalized_parameters,
+        }
+        preview_id = f"preview_{hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True).encode('utf-8')).hexdigest()[:16]}"
+        candidate_record = {
+            "id": preview_id,
+            "label": display_name,
+            "path": Path(),
+            "relativePath": "",
+            "sourceType": "manual" if mode == "create" else "adjusted",
+            "maskKey": preview_id,
+            "colorHex": color_hex,
+            "mask": candidate_mask,
+            "modifiedUtc": 0.0,
+            "originalPath": (
+                target_record.get("originalPath") or target_record.get("path")
+                if target_record is not None
+                else None
+            ),
+            "originalLabel": (
+                target_record.get("originalLabel") or target_record.get("label")
+                if target_record is not None
+                else None
+            ),
+            "registry": {
+                "seed_cell_types": list(seed_cell_types),
+                "target_boundary_id": str(target_record["id"]) if target_record is not None else None,
+                "target_boundary_label": str(target_record["label"]) if target_record is not None else None,
+                "target_cell_type": target_preferred_type,
+            },
+        }
+        display_cell_types = (
+            self._select_region_cell_types(payload)
+            if "selectedCellTypes" in payload
+            else list(seed_cell_types)
+        )
+        return {
+            "mode": mode,
+            "seedCellTypes": seed_cell_types,
+            "selectedCellTypes": display_cell_types,
+            "selectedSeedCellCount": len(selected_seed_labels),
+            "baseCellCount": len(base_labels),
+            "resultSeedCellCount": len(result_labels),
+            "parameters": normalized_parameters,
+            "params": params,
+            "record": candidate_record,
+            "targetRecord": target_record,
+            "identity": identity,
+        }
+
+    def region_manual_preview(self, _request_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        config = self._require_config()
+        candidate = self._manual_region_candidate(payload)
+        record = candidate["record"]
+        output_dir = _section_dir(config, "region_analysis")
+        preview_path = self._preview_cache_path(
+            output_dir,
+            "region_manual_preview",
+            payload.get("previewKey") or "manual_editor",
+            candidate["identity"],
+        )
+        preview_path, width, height = self._write_exact_region_preview(
+            [record],
+            candidate["selectedCellTypes"],
+            candidate["params"],
+            preview_path,
+        )
+        regions, _, _ = self._region_catalog([record])
+        return {
+            "previewPath": str(preview_path),
+            "width": width,
+            "height": height,
+            "summary": {
+                "mode": candidate["mode"],
+                "selectedSeedCellCount": candidate["selectedSeedCellCount"],
+                "baseCellCount": candidate["baseCellCount"],
+                "resultSeedCellCount": candidate["resultSeedCellCount"],
+                "region": regions[0],
+            },
+            "parameters": candidate["parameters"],
+        }
+
+    @staticmethod
+    def _unique_region_label(requested: str, records: Sequence[Dict[str, Any]]) -> str:
+        used = {str(record["label"]).casefold() for record in records}
+        if requested.casefold() not in used:
+            return requested
+        suffix = 2
+        while f"{requested} ({suffix})".casefold() in used:
+            suffix += 1
+        return f"{requested} ({suffix})"
+
+    def region_manual_save(self, request_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        config = self._require_config()
+        if not isinstance(payload.get("displayName"), str) or not str(payload.get("displayName")).strip():
+            raise ValueError("Region manual save requires a nonempty displayName.")
+        candidate = self._manual_region_candidate(payload)
+        existing_records = self._load_region_records([])
+        display_name = self._unique_region_label(str(payload["displayName"]).strip(), existing_records)
+        semantic_identity = dict(candidate["identity"])
+        semantic_identity["displayName"] = display_name
+        digest = hashlib.sha256(
+            json.dumps(semantic_identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:16]
+        roi_id = f"roi_{digest}"
+        mask_key = f"manual_{digest}"
+        candidate_record = candidate["record"]
+        candidate_record["id"] = roi_id
+        candidate_record["label"] = display_name
+        candidate_record["maskKey"] = mask_key
+
+        output_dir = _section_dir(config, "region_analysis")
+        target_record = candidate["targetRecord"]
+        original_relative: str | None = None
+        original_label: str | None = None
+        target_preferred_type: str | None = None
+        if target_record is not None:
+            original_path = target_record.get("originalPath") or target_record.get("path")
+            if isinstance(original_path, Path):
+                try:
+                    original_relative = str(original_path.resolve().relative_to(output_dir.resolve())).replace("\\", "/")
+                except ValueError:
+                    original_relative = None
+            original_label = str(target_record.get("originalLabel") or target_record.get("label"))
+            existing_rows, _, _ = self._region_catalog(existing_records)
+            row_by_id = {str(row["id"]): row for row in existing_rows}
+            record_rows = {
+                str(record["id"]): (record, row_by_id[str(record["id"])])
+                for record in existing_records
+                if str(record["id"]) in row_by_id
+            }
+            target_pair = record_rows.get(str(target_record.get("id") or ""))
+            if target_pair is not None:
+                target_preferred_type = self._preferred_region_cell_type(
+                    target_pair[0],
+                    target_pair[1],
+                    record_rows,
+                )
+        metadata = {
+            "id": roi_id,
+            "source_type": str(candidate_record["sourceType"]),
+            "color_hex": str(candidate_record["colorHex"]),
+            "original_mask_path": original_relative,
+            "original_label": original_label,
+            "target_boundary_id": str(target_record["id"]) if target_record is not None else None,
+            "target_boundary_label": str(target_record["label"]) if target_record is not None else None,
+            "target_cell_type": target_preferred_type,
+            "created_mode": str(candidate["mode"]),
+            "seed_cell_types": list(candidate["seedCellTypes"]),
+            "display_parameters": dict(candidate["parameters"]),
+        }
+        _progress(request_id, 0.20, "Saving the adjusted Region boundary")
+        saved = save_adjusted_region_analysis(
+            df_cells=self.assignment_result["df_cells"],
+            celltype_mask=self.assignment_result["celltype_mask"],
+            celltype_cfg=self.celltype_config,
+            save_dir=output_dir,
+            pixel_size_um=config.pixel_size_um,
+            adjusted_masks={mask_key: np.asarray(candidate_record["mask"], dtype=bool)},
+            selected_types=candidate["seedCellTypes"],
+            edit_meta={
+                "target_type": str(target_record["label"]) if target_record is not None else None,
+                "edit_mode": str(candidate["mode"]),
+                "display_name": display_name,
+            },
+            edited_boundary_types=[mask_key],
+            boundary_display_names={mask_key: display_name},
+            line_width=float(candidate["params"].line_width),
+            line_style=str(candidate["params"].line_style),
+            boundary_color=str(candidate["params"].boundary_color),
+            use_type_colors=bool(candidate["params"].use_type_colors),
+            contour_downsample=int(candidate["params"].contour_downsample),
+            replace_registry_source=None,
+            registry_entry_metadata={mask_key: metadata},
+            save_outputs=True,
+        )
+        _close_figures(saved)
+        warnings: list[str] = []
+        records = self._load_region_records(warnings)
+        self._set_region_records(records)
+        regions, dominant_counts, boundaries = self._region_catalog(records)
+        saved_record = next((record for record in records if record["id"] == roi_id), None)
+        if saved_record is None:
+            raise RuntimeError("The adjusted Region boundary was saved but could not be reloaded from the boundary registry.")
+        preview_path = self._preview_cache_path(
+            output_dir,
+            "region_manual_saved",
+            roi_id,
+            semantic_identity,
+        )
+        preview_path, width, height = self._write_exact_region_preview(
+            [saved_record],
+            candidate["selectedCellTypes"],
+            candidate["params"],
+            preview_path,
+        )
+        if "region" not in self.analysis_parameters:
+            self.analysis_parameters["region"] = dict(candidate["parameters"])
+        self.distribution_result = None
+        self._mark_workflow_stage("region", invalidate_after=True)
+        _progress(request_id, 1.0, "Adjusted Region boundary saved")
+        return {
+            "summary": {
+                "savedRegionId": roi_id,
+                "savedRegionLabel": display_name,
+                "boundaryCount": len(boundaries),
+            },
+            "regions": regions,
+            "dominantCounts": dominant_counts,
+            "boundaries": boundaries,
+            "previewPath": str(preview_path),
+            "width": width,
+            "height": height,
+            "parameters": candidate["parameters"],
+            "warnings": warnings,
+            "artifacts": _artifact_manifest(Path(config.save_dir), output_dir),
+        }
+
+    def region_custom_export(self, _request_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        config = self._require_config()
+        if self.assignment_result is None:
+            raise RuntimeError("Run cell type assignment before exporting Region views.")
+        records, warnings = self._select_region_records(payload)
+        all_records = self._load_region_records([])
+        requested_boundary_count = len(records)
+        selected_cell_types = self._select_region_cell_types(payload)
+        boundary_cell_type_mode = self._boundary_cell_type_mode(payload)
+        records, regions, dominant_counts, boundaries = self._filter_region_records_by_cell_types(
+            records,
+            selected_cell_types,
+            boundary_cell_type_mode,
+        )
+        if not records:
+            raise ValueError("No selected Region boundary matches the selected cell types.")
+        params, normalized_parameters = self._normalize_region_parameters(
+            payload,
+            selected_cell_types,
+            inherit_saved=True,
+        )
+        identity = {
+            "boundaries": [str(record["id"]) for record in records],
+            "cellTypes": selected_cell_types,
+            "boundaryCellTypeMode": boundary_cell_type_mode,
+            "parameters": normalized_parameters,
+        }
+        digest = hashlib.sha256(
+            json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:14]
+        root = _section_dir(config, "integrated_region_analysis")
+        original_dir = root / "01_original_unmodified"
+        customized_dir = root / "02_customized_display"
+        original_dir.mkdir(parents=True, exist_ok=True)
+        customized_dir.mkdir(parents=True, exist_ok=True)
+
+        customized_png = customized_dir / f"customized_region__{digest}.png"
+        customized_pair = self._write_region_preview_pair(
+            records,
+            selected_cell_types,
+            params,
+            customized_png,
+        )
+        customized_tiff = customized_png.with_suffix(".tiff")
+        with Image.open(customized_pair["comparisonPreviewPath"]) as image:
+            image.save(customized_tiff, format="TIFF", compression="tiff_deflate")
+        self._write_png_backed_svg(
+            Path(customized_pair["comparisonPreviewPath"]),
+            customized_png.with_suffix(".svg"),
+            "Customized Region display",
+        )
+
+        original_records: list[Dict[str, Any]] = []
+        used_original_keys: set[str] = set()
+        all_by_id = {str(record["id"]): record for record in all_records}
+
+        def append_original(record: Dict[str, Any], key: str) -> None:
+            if key in used_original_keys:
+                return
+            original_records.append(record)
+            used_original_keys.add(key)
+
+        for record in records:
+            if str(record.get("sourceType")) == "computational":
+                append_original(dict(record), f"id:{record['id']}")
+                continue
+            registry = record.get("registry") if isinstance(record.get("registry"), dict) else {}
+            target_record = all_by_id.get(str(registry.get("target_boundary_id") or ""))
+            if target_record is not None and str(target_record.get("id")) != str(record.get("id")):
+                append_original(dict(target_record), f"id:{target_record['id']}")
+                continue
+            original_path = record.get("originalPath")
+            if not isinstance(original_path, Path) or not original_path.is_file():
+                continue
+            original_mask = np.asarray(record["mask"], dtype=bool)
+            original_label = str(record.get("originalLabel") or record["label"])
+            try:
+                candidate_mask = np.asarray(load_any_tiff(original_path))
+                if candidate_mask.ndim == 2 and candidate_mask.shape == original_mask.shape and np.any(candidate_mask):
+                    original_mask = candidate_mask.astype(bool)
+                else:
+                    continue
+            except Exception as error:
+                warnings.append(f"Could not load the original boundary for {record['label']}: {error}")
+                continue
+            original_record = dict(record)
+            original_record["label"] = original_label
+            original_record["mask"] = original_mask
+            append_original(original_record, f"path:{original_path.resolve()}")
+        if not original_records:
+            for record in all_records:
+                if str(record.get("sourceType")) == "computational":
+                    append_original(dict(record), f"id:{record['id']}")
+        used_original_labels: set[str] = set()
+        for record in original_records:
+            base_label = str(record["label"])
+            label = base_label
+            suffix = 2
+            while label.casefold() in used_original_labels:
+                label = f"{base_label} (Original {suffix})"
+                suffix += 1
+            record["label"] = label
+            used_original_labels.add(label.casefold())
+        original_png = original_dir / f"original_region__{digest}.png"
+        original_pair = self._write_region_preview_pair(
+            original_records,
+            selected_cell_types,
+            params,
+            original_png,
+        )
+        original_tiff = original_png.with_suffix(".tiff")
+        with Image.open(original_pair["comparisonPreviewPath"]) as image:
+            image.save(original_tiff, format="TIFF", compression="tiff_deflate")
+        self._write_png_backed_svg(
+            Path(original_pair["comparisonPreviewPath"]),
+            original_png.with_suffix(".svg"),
+            "Original unmodified Region display",
+        )
+
+        write_json(
+            customized_dir / f"customized_region__{digest}.json",
+            {
+                "workflow": "customized_region_export",
+                "selectedBoundaryIds": [str(record["id"]) for record in records],
+                "selectedBoundaryLabels": [str(record["label"]) for record in records],
+                "selectedCellTypes": selected_cell_types,
+                "boundaryCellTypeMode": boundary_cell_type_mode,
+                "parameters": normalized_parameters,
+                "width": int(customized_pair["width"]),
+                "height": int(customized_pair["height"]),
+                "comparisonWidth": int(customized_pair["comparisonWidth"]),
+                "comparisonHeight": int(customized_pair["comparisonHeight"]),
+            },
+        )
+        write_json(
+            original_dir / f"original_region__{digest}.json",
+            {
+                "workflow": "original_unmodified_region_export",
+                "sourceBoundaryIds": [str(record["id"]) for record in records],
+                "exportedBoundaryLabels": [str(record["label"]) for record in original_records],
+                "selectedCellTypes": selected_cell_types,
+                "boundaryCellTypeMode": boundary_cell_type_mode,
+                "parameters": normalized_parameters,
+                "width": int(original_pair["width"]),
+                "height": int(original_pair["height"]),
+                "comparisonWidth": int(original_pair["comparisonWidth"]),
+                "comparisonHeight": int(original_pair["comparisonHeight"]),
+            },
+        )
+        return {
+            "previewPath": str(customized_pair["comparisonPreviewPath"]),
+            "overlayPreviewPath": str(customized_pair["overlayPreviewPath"]),
+            "maskPreviewPath": str(customized_pair["maskPreviewPath"]),
+            "comparisonPreviewPath": str(customized_pair["comparisonPreviewPath"]),
+            "originalOverlayPreviewPath": str(original_pair["overlayPreviewPath"]),
+            "originalMaskPreviewPath": str(original_pair["maskPreviewPath"]),
+            "originalComparisonPreviewPath": str(original_pair["comparisonPreviewPath"]),
+            "width": int(customized_pair["width"]),
+            "height": int(customized_pair["height"]),
+            "comparisonWidth": int(customized_pair["comparisonWidth"]),
+            "comparisonHeight": int(customized_pair["comparisonHeight"]),
+            "boundaryCellTypeMode": boundary_cell_type_mode,
+            "requestedBoundaryCount": requested_boundary_count,
+            "boundaryCount": len(records),
+            "regions": regions,
+            "dominantCounts": dominant_counts,
+            "boundaries": boundaries,
+            "artifacts": _artifact_manifest(Path(config.save_dir), root),
+            "warnings": warnings,
         }
 
     def cell_distribution(self, request_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1909,7 +3298,7 @@ class NativeEngine:
         )
         self._invalidate_workflow_from("distribution")
         _progress(request_id, 0.08, "Building distance bands")
-        distribution_config = read_distribution_config(Path(config.save_dir))
+        distribution_config = _distribution_config_for_output(Path(config.save_dir))
         region_masks = run_region_mask_band_analysis(
             config=distribution_config,
             data_result=self._ensure_pixels(),
@@ -1929,7 +3318,6 @@ class NativeEngine:
         )
         self.distribution_result = {"region_masks": region_masks, "density": density}
         output_dir = _section_dir(config, "cell_distribution_analysis")
-        preview_candidates = sorted(output_dir.rglob("*.png"))
         self.analysis_parameters["distribution"] = {
             "boundaryLabel": requested_label,
             "bandWidthUm": band_width_um,
@@ -1940,7 +3328,7 @@ class NativeEngine:
         _progress(request_id, 1.0, "Cell distribution analysis complete")
         return {
             "summary": {"selectedCellTypes": selected_types, "boundaryLabel": requested_label},
-            "previewPath": str(preview_candidates[0]) if preview_candidates else None,
+            **_distribution_result_preview_contract(region_masks, density),
             "artifacts": _artifact_manifest(Path(config.save_dir), output_dir),
         }
 

@@ -95,6 +95,12 @@ try {
     Assert-Success "exact nuclei optimizer grouping tests"
     & $PythonExe -m unittest discover -s $TestsRoot -p "test_celltype_vectorized_rules.py" -v
     Assert-Success "exact vectorized cell-type rule tests"
+    & $PythonExe -m unittest discover -s $TestsRoot -p "test_region_overlay_filtering.py" -v
+    Assert-Success "Region overlay filtering tests"
+    & $PythonExe (Join-Path $TestsRoot "region_registry_rerun_smoke.py")
+    Assert-Success "Region registry rerun smoke test"
+    & $PythonExe (Join-Path $TestsRoot "distribution_preview_contract_smoke.py")
+    Assert-Success "cell distribution preview contract smoke test"
     & $PythonExe (Join-Path $TestsRoot "optimizer_acceleration_smoke.py") `
         --work-root (Join-Path $WindowsRoot "build\optimizer-acceleration-smoke") `
         --minimum-speedup 2.0

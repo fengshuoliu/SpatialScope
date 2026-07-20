@@ -10,7 +10,7 @@
     <AssemblyName>SpatialScope</AssemblyName>
     <RootNamespace>SpatialScope.Windows</RootNamespace>
     <ApplicationIcon>..\..\..\desktop\assets\SpatialScope.ico</ApplicationIcon>
-    <Version>1.2.2</Version>
+    <Version>1.2.3</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Authors>SpatialScope</Authors>
     <Product>SpatialScope for Windows</Product>

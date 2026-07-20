@@ -1,6 +1,6 @@
 # SpatialScope User Manual
 
-**Applies to:** SpatialScope 1.2.1 for macOS and SpatialScope 1.2.2 for Windows<br>
+**Applies to:** SpatialScope 1.2.1 for macOS and SpatialScope 1.2.3 for Windows<br>
 **Workflow:** image preparation → aligned channel CSV files → composite preview → nuclei → cell types → neighborhoods → regions → distribution → distances → exports
 
 > The screenshots show the macOS interface with an example 16-channel dataset. Windows uses the same nine-stage analysis workflow and output contracts in a native WPF desktop layout, so control placement differs slightly. Marker names, colors, cell types, counts, and results will vary by dataset.
@@ -56,7 +56,7 @@ The intended in-app order is left to right in the sidebar. You can open any step
 | 4. Cell Type Assignment | Apply marker-rule phenotypes | Final nuclei segmentation |
 | 5. Neighborhood Analysis | Group occupied spatial tiles by cell-type presence | Final cell-type assignment |
 | 6. Region Analysis | Build ROI masks and boundaries | Final cell-type assignment |
-| 7. Cell Distribution | Build boundary bands, densities, and cluster distributions | Calibration, assignment, and regions; neighborhoods for cluster mode |
+| 7. Cell Distribution | Build boundary bands and densities; macOS also exposes cluster distributions | Calibration, assignment, and regions; neighborhoods for the macOS cluster mode |
 | 8. Distance Analysis | Measure cell-to-cell and cell-to-boundary distances | Assignment; saved region mask for boundary mode |
 | 9. Results & Exports | Review all generated files | At least one saved output |
 
@@ -214,7 +214,7 @@ The sidebar status is a workflow indicator, not a scientific validation guarante
 - Use **Command-O** on macOS to choose an input folder. On Windows, click the input or output path field or its **Choose** button to open the native folder browser.
 - On macOS, use **Command-R** to generate the overlay. On Windows, select the overlay command in Step 2.
 - On macOS, image previews can be scrolled when zoomed, pinch-zoomed from approximately 0.08× to 16×, and double-clicked to reset to fit.
-- On Windows, place the pointer over any plot and use the mouse wheel to zoom. Drag to pan while zoomed; double-click or press **0** to fit the image again. The **+**, **-**, and arrow keys provide keyboard zoom and pan after the plot receives focus.
+- On Windows, plain mouse-wheel movement scrolls the page. Place the pointer over a plot and hold **Ctrl** while using the mouse wheel to zoom. Drag to pan while zoomed; double-click or press **0** to fit the image again. The **+**, **-**, and arrow keys provide keyboard zoom and pan after the plot receives focus.
 - The bottom **Open Output** button reveals the current output folder; it does not choose a different output folder.
 - Errors appear in the status bar rather than in a modal dialog.
 - There is no visible Cancel button in the current interface. Wait for a running operation to finish before starting another.
@@ -233,7 +233,7 @@ Use this checklist for a standard full run:
 6. In **Cell Type Assignment**, define and save marker rules. Tune or screen assignment parameters, then run the final assignment.
 7. In **Neighborhood Analysis**, choose a square size and run the analysis.
 8. In **Region Analysis**, select ROI-defining cell types, tune ROI morphology, and run ROI identification. Optionally create adjusted ROIs and customized figures.
-9. In **Cell Distribution**, generate Region masks before Cell density. Cell cluster distribution is independent of the band arrays and instead requires saved Region boundaries plus Neighborhood Analysis.
+9. In **Cell Distribution** on Windows 1.2.3, choose a saved Region boundary, band width, and one or more cell types, then run once to generate both the boundary-band map and linked density plot. On macOS, generate Region masks before Cell density; the separate Cell cluster distribution tab also requires Neighborhood Analysis.
 10. In **Distance Analysis**, run nearest-neighbor and/or boundary-distance analyses.
 11. In **Results & Exports**, refresh the list and reveal the output folder.
 
@@ -675,9 +675,9 @@ Current-build interpretation details:
 - All disconnected retained islands for one source cell type are stored in one ROI record.
 - ROI area is the true mask-pixel count × calibrated pixel area.
 - A cell is counted when its rounded centroid falls inside the ROI.
-- `cellCount` includes Unassigned and Ambiguous cells; `assignedCellCount` excludes them.
-- The ROI’s displayed dominant type is the source type used to generate it.
-- The current **Region dominant counts** table labels its numeric column **Regions**, but that value is the cell count stored for each ROI, not a count of disconnected islands.
+- `cellCount` is the sum of assigned, named cell types inside the ROI; Unassigned and Ambiguous cells are excluded.
+- The ROI’s displayed dominant type is the most abundant assigned cell type inside it. The source type used to generate a computational ROI remains available separately.
+- **Region dominant counts** reports how many saved ROI records are dominated by each cell type. It is a count of ROIs, not cells or disconnected mask islands.
 
 ### 10.3 Create or adjust an ROI manually
 
@@ -705,7 +705,7 @@ To edit:
    - Manual close: default 2 µm, range 0–30 µm;
    - Manual dilate: default 0 µm, range 0–30 µm;
    - Manual min area: default 0 µm²;
-   - Manual min cells: default 1, but currently ignored by the manual-ROI implementation; and
+   - Manual min cells: default 1 and applied to each rebuilt connected component; and
    - Manual contour detail: default 1, choices 1, 2, 4, or 8.
 8. Draw on the editable cell-type panel:
    - in Polygon mode, click at least three points;
@@ -721,9 +721,9 @@ To edit:
 
 Use **Reset Drawing** to clear all current areas. **Save Adjusted ROI** is enabled only after a valid closed area exists; Inclusion and Exclusion also require an existing target ROI.
 
-Free-draw strokes are converted to a convex hull. A concave hand-drawn shape may therefore expand to its convex envelope. For exact concave selection, use multiple smaller closed areas or Polygon mode.
+Free-draw paths retain their sampled outline when rasterized for centroid selection, so concave selections are preserved. The final ROI is still rebuilt from the selected cells and may change shape when closing, dilation, area, or cell-count filters are applied.
 
-Manual ROI morphology is not identical to automated Region Analysis morphology. The manual editor uses square closing/dilation and clips the rebuilt mask to a local rectangular envelope; automated ROIs use disk morphology. Numerically identical radii can therefore produce different shapes. Manual minimum area removes small components only when at least one component survives the filter; if every component is below the threshold, the current build retains the unfiltered mask instead. The visible **Manual min cells** value is not applied—manual ROI generation currently hardcodes a one-cell minimum.
+Manual ROI rebuilding uses the same isotropic/disk closing and dilation model as computational Region Analysis. Minimum area and minimum cells are both applied to connected components. If no component survives the selected settings, the app reports an error and does not save an empty or unfiltered fallback ROI.
 
 Saving an adjusted ROI updates the Region Analysis result and boundary registry under `07_region_analysis`; it does not write the adjusted ROI into `08_adjusted_region_analysis`. It also invalidates the in-memory Cell Distribution result. Rerun downstream region-dependent analyses after any ROI change.
 
@@ -748,7 +748,7 @@ The app saves both the customized display and an original unmodified comparison 
 
 ## 11. Step 7 — Cell Distribution
 
-Step 7 has three tabs: **Region masks**, **Cell density**, and **Cell cluster distribution**.
+Windows 1.2.3 presents two numbered subsections: **Boundary-banded regions** and **Cell density by boundary distance**. One Windows run generates both linked results from the same boundary and band width. macOS presents the corresponding **Region masks** and **Cell density** tabs separately and also includes **Cell cluster distribution**.
 
 ### 11.1 Cell Distribution runtime
 
@@ -760,24 +760,26 @@ If a packaged release reports a missing Cell Distribution runtime, reinstall the
 
 There is no per-step Cancel button. On Windows, closing SpatialScope performs a bounded shutdown and stops its packaged analysis engine; on macOS, allow the active helper operation to finish.
 
-### 11.2 Generate Region masks first
+### 11.2 Generate boundary bands and a density profile
 
 Prerequisites:
 
 - positive X/Y calibration;
 - final cell-type assignment; and
 - at least one saved Region Analysis boundary mask; and
-- the original input folder and configured channel CSVs still accessible at the absolute paths stored in `pipeline_config.json`.
+- the original input folder and configured channel CSVs still accessible at the paths stored in `pipeline_config.json`.
 
-The Region-mask exporter rereads the original CSV matrices. Copying only the output folder to another Mac or moving the input data breaks this step unless the saved paths are updated and the source files are available.
+The Region-mask exporter rereads the original CSV matrices. A copied or moved output project writes new results beneath the output folder selected during restore, but the saved input folder must still be available. If the input data moved, update the project configuration before rerunning this step.
 
-Procedure:
+Windows procedure:
 
-1. Open **Region masks**.
-2. Choose **Boundary from Region analysis**.
-3. Set **Band width (um)**. The default is 10 µm; the range is 0.5–100 µm in 0.5 µm steps.
-4. Click **Generate region masks**.
-5. Inspect the band map and Band summary.
+1. Under **1. Boundary-banded regions**, choose **Boundary from ROI analysis**.
+2. Set **Distance band width**. The default is 10 µm.
+3. Under **2. Cell density by boundary distance**, select one or more cell types. All assigned types are selected by default and at least one remains selected.
+4. Click **Generate boundary bands and density profile**.
+5. Inspect both the boundary band map and the multi-series cell-density line plot.
+
+On macOS, generate **Region masks** for the intended boundary and band width first, then open **Cell density**, select cell types, and generate the density plot.
 
 ![Region boundary bands](figures/15-region-boundary-bands.jpg)
 
@@ -787,15 +789,11 @@ The Python workflow computes anisotropic Euclidean distance to the ROI interface
 
 The outer image frame is removed when Step 7 defines the ROI interface. This differs from Step 8 boundary distance, which includes the outer image frame when it is part of the mask boundary.
 
-### 11.3 Generate Cell density
+### 11.3 Interpret Cell density
 
-Cell density uses the most recently modified saved Region masks arrays.
+Cell density uses the exact signed-distance arrays generated for the displayed boundary band map.
 
-1. Generate Region masks for the intended boundary and band width.
-2. Open **Cell density**.
-3. Select one or more **Cell types for density**. All configured types are selected by default; the UI keeps at least one selected.
-4. Click **Generate cell density**.
-5. Inspect the plot, band table, and region metrics.
+On Windows, changing the boundary, band width, or selected cell types invalidates both linked previews; click **Generate boundary bands and density profile** again. On macOS, regenerate Region masks before density whenever the boundary or band width changes.
 
 ![Cell density by distance band](figures/16-cell-density-by-distance-band.jpg)
 
@@ -810,11 +808,11 @@ density per mm² = cell count / (band area in µm² / 1,000,000)
 
 Inside distances are plotted as negative and outside distances as positive. Unassigned and Ambiguous cells are excluded by default.
 
-If you change the ROI or band width, regenerate Region masks immediately before rerunning density so the intended arrays are the most recent.
+If you change or manually adjust an ROI, rerun Cell Distribution so the band map and density profile use the updated boundary.
 
-### 11.4 Generate Cell cluster distribution
+### 11.4 Generate Cell cluster distribution (macOS)
 
-Prerequisites include a completed Neighborhood Analysis.
+The Cell cluster distribution tab is currently exposed by the macOS app. Prerequisites include a completed Neighborhood Analysis. Windows 1.2.3 does not expose this third tab in its native interface.
 
 1. Open **Cell cluster distribution**.
 2. Select one or more Region Analysis boundaries. If no explicit selection is stored, the app begins with up to the first three; click **Use All Boundaries** to select every boundary.
@@ -986,9 +984,9 @@ Do not point a new input dataset at an old output folder. On Windows, selecting 
 | Channel/marker names | Steps 2–8, including updating and resaving Marker Rules |
 | Nuclei parameters | Steps 3–8 |
 | Cell-type rules or assignment parameters | Steps 4–8 |
-| Neighborhood square size | Step 5 and Cell cluster distribution |
+| Neighborhood square size | Step 5 and the macOS Cell cluster distribution tab |
 | ROI parameters or adjusted ROI | Step 6, Step 7, and boundary-dependent Step 8 analyses |
-| Region-mask band width | Region masks, then Cell density |
+| Region-mask band width | Windows: rerun Cell Distribution once; macOS: rerun Region masks, then Cell density |
 
 ### 15.4 Record validation decisions
 
@@ -1041,12 +1039,12 @@ Before accepting a recommendation:
 | Assignment Local looks identical to Otsu | Current Local mode uses Global Otsu | Use Otsu or Yen; do not expect local adaptation in this build |
 | Region analysis has fewer ROIs than visible islands | All islands for one source type are aggregated into one ROI record | Interpret ROI records by source type and inspect the saved mask |
 | Manual drawing selects no cells | No eligible cell centroid lies inside the closed area | Close a valid area around visible seed-cell centroids and verify the editing cell type |
-| Concave Free draw becomes broader | Free draw is converted to a convex hull | Use Polygon mode or several smaller closed areas |
+| Free-draw boundary misses the intended edge | The sampled free-draw path is preserved, including concave sections, but a sparse or open stroke can still miss the intended area | Draw one continuous closed path with enough points around the intended boundary, or use Polygon mode for precise corners |
 | Cell Distribution says resolution is required | Calibration is missing | Enter and save all four calibration values |
 | Distance Analysis reports µm despite missing scale | Step 8 silently fell back to 1 µm/pixel | Enter and save valid X/Y calibration, then rerun the distance analysis |
 | Cell Distribution runtime error | The application package is incomplete, damaged, or from an unsupported build | Reinstall the complete app from the official DMG or rerun the complete Windows installer; source builders should rebuild the bundled runtime |
 | Step 7 fails after moving/copying a run | `pipeline_config.json` still stores the original absolute CSV path | Restore access to the original inputs or reselect the input/output folders and save configuration |
-| Cell density uses the wrong boundary/band width | It loads the most recently modified Region masks arrays | Regenerate the intended Region masks immediately before density |
+| Cell density uses the wrong boundary/band width | On Windows, the selected boundary or band-width control does not match the intended analysis; on macOS, Cell density loads the most recently modified Region masks arrays | Windows: select the intended boundary and band width, then rerun Cell Distribution. macOS: regenerate the intended Region masks immediately before density |
 | No boundary masks found | No Region Analysis mask has been saved | Run computational ROI identification or save an adjusted ROI |
 | Boundary mask size mismatch | Mask and current assignment image come from different datasets/dimensions | Use one output folder per dataset and rerun Region Analysis |
 | Old results remain visible after changing input | Input/output selection does not clear every downstream result | Choose fresh paths, restart the app, confirm the paths, and rerun the workflow |

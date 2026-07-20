@@ -1,24 +1,24 @@
 # Release SpatialScope Through GitHub
 
-SpatialScope distributes ad-hoc-signed macOS builds and unsigned Windows x64 builds through GitHub Releases. The platforms release independently: macOS 1.2.1 uses Sparkle for updates, while Windows 1.2.2 is a native WPF application distributed with a setup executable. Apple Developer Program and commercial Windows code-signing memberships are not required. Users approve the app once through macOS Privacy & Security or Windows SmartScreen.
+SpatialScope distributes ad-hoc-signed macOS builds and unsigned Windows x64 builds through GitHub Releases. The platforms release independently: macOS 1.2.1 uses Sparkle for updates, while Windows 1.2.3 is a native WPF application distributed with a setup executable. Apple Developer Program and commercial Windows code-signing memberships are not required. Users approve the app once through macOS Privacy & Security or Windows SmartScreen.
 
 ## Platform versions and tags
 
 - macOS uses `v<version>` tags, the Xcode marketing version and build number, and the Sparkle feed in `docs/appcast.xml`.
 - Windows uses `windows-v<version>` tags and the `<Version>` value in `windows/native/src/SpatialScope.App/SpatialScope.App.csproj`.
 - A Windows-only release must not change the Xcode version, macOS artifacts, or Sparkle appcast.
-- A Windows-only release must set GitHub's `make_latest` value to `false`, so the current macOS release remains the repository's Latest release.
+- Platform download links must use pinned platform tags. GitHub's repository-level Latest badge may point to the newest macOS or Windows release without breaking the other platform's download.
 
-For Windows 1.2.2, use the tag `windows-v1.2.2`. Its stable download URL is:
+For Windows 1.2.3, use the tag `windows-v1.2.3`. Its stable download URL is:
 
 ```text
-https://github.com/fengshuoliu/SpatialScope/releases/download/windows-v1.2.2/SpatialScope-Windows-x64-Setup.exe
+https://github.com/fengshuoliu/SpatialScope/releases/download/windows-v1.2.3/SpatialScope-Windows-x64-Setup.exe
 ```
 
-The macOS download URL continues to use GitHub's Latest release:
+The macOS download URL remains pinned to its platform release:
 
 ```text
-https://github.com/fengshuoliu/SpatialScope/releases/latest/download/SpatialScope-macOS-universal.dmg
+https://github.com/fengshuoliu/SpatialScope/releases/download/v1.2.1/SpatialScope-macOS-universal.dmg
 ```
 
 ## One-time setup
@@ -138,13 +138,13 @@ Inspect `docs/appcast.xml` before publishing. It must contain the new version, b
 1. Commit and push the Windows version, changelog, source changes, and release documentation.
 2. Create the tag `windows-v<version>` from the tested commit.
 3. Create a normal GitHub release named `SpatialScope <version> for Windows`. Upload `SpatialScope-Windows-x64-Setup.exe` and `SHA256SUMS-Windows.txt`.
-4. Set the GitHub Releases API field `make_latest` to `false` when creating or publishing the release. Do not mark the release as a prerelease solely to preserve the macOS Latest designation.
+4. Set the GitHub Releases API field `make_latest` deliberately. Windows 1.2.3 is published as the repository's Latest release; platform download links remain pinned so the macOS download is unaffected.
 5. Publish the Windows release and verify the pinned setup URL, installer launch, checksum, installation, application launch, and uninstall on Windows 10 or 11.
-6. Confirm that `https://github.com/fengshuoliu/SpatialScope/releases/latest` still resolves to the current macOS release and that the macOS DMG latest-download URL still works.
+6. Confirm that `https://github.com/fengshuoliu/SpatialScope/releases/latest` resolves to the intended newest release and that both pinned macOS and Windows downloads work.
 7. Do not regenerate or commit `docs/appcast.xml` for this Windows-only release.
 8. Update public Windows download links to the pinned `windows-v<version>` URL. Do not use `/releases/latest/download/` for a platform-specific Windows asset.
 
-Keep the existing macOS release notes, `v1.2.1` tag, assets, Xcode version, and Sparkle appcast unchanged when publishing Windows 1.2.2.
+Keep the existing macOS release notes, `v1.2.1` tag, assets, Xcode version, and Sparkle appcast unchanged when publishing Windows 1.2.3.
 
 ## Rollback
 

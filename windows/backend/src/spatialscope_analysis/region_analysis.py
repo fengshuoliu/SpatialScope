@@ -28,7 +28,10 @@ from .visualization import add_colored_type_text, add_scalebar_20um, axis_off
 def um_to_px_iso(value_um: float, pixel_size_um: Tuple[float, float]) -> int:
     px_um_x, px_um_y = float(pixel_size_um[0]), float(pixel_size_um[1])
     scale = np.sqrt(max(1e-12, px_um_x * px_um_y))
-    return max(1, int(round(float(value_um) / scale)))
+    value_um = float(value_um)
+    if value_um <= 0:
+        return 0
+    return max(1, int(round(value_um / scale)))
 
 
 def _name_to_id(celltype_cfg: Sequence[Dict[str, Any]]) -> Dict[str, int]:
@@ -76,6 +79,26 @@ def _mask_boundary(mask: np.ndarray, thickness: int = 1) -> np.ndarray:
     return boundary
 
 
+def _apply_raster_line_style(boundary: np.ndarray, line_style: str) -> np.ndarray:
+    """Apply a compact dash pattern while preserving source-pixel dimensions."""
+
+    style = str(line_style).strip()
+    if style == "-":
+        return boundary
+    y, x = np.indices(boundary.shape)
+    phase = (x + (2 * y)).astype(np.int64)
+    if style == "--":
+        pattern = (phase % 12) < 8
+    elif style == "-.":
+        cycle = phase % 18
+        pattern = (cycle < 9) | ((cycle >= 12) & (cycle < 14))
+    elif style == ":":
+        pattern = (phase % 6) < 2
+    else:
+        pattern = np.ones(boundary.shape, dtype=bool)
+    return boundary & pattern
+
+
 def make_region_canvas_rgb(
     celltype_mask: np.ndarray,
     celltype_cfg: Sequence[Dict[str, Any]],
@@ -85,19 +108,55 @@ def make_region_canvas_rgb(
     boundary_color: str = "#a1d99b",
     use_type_colors: bool = True,
     thickness: int = 2,
+    boundary_colors: Dict[str, str] | None = None,
+    line_style: str = "-",
 ) -> np.ndarray:
     rgb = make_celltype_mask_rgb(
         celltype_mask,
         celltype_cfg,
         selected_types=(display_celltypes if display_celltypes is not None else selected_types),
     )
+    return draw_region_boundaries_rgb(
+        rgb,
+        celltype_cfg=celltype_cfg,
+        masks=masks,
+        selected_types=selected_types,
+        boundary_color=boundary_color,
+        use_type_colors=use_type_colors,
+        thickness=thickness,
+        boundary_colors=boundary_colors,
+        line_style=line_style,
+    )
+
+
+def draw_region_boundaries_rgb(
+    base_rgb: np.ndarray,
+    celltype_cfg: Sequence[Dict[str, Any]],
+    masks: Dict[str, np.ndarray],
+    selected_types: Sequence[str],
+    boundary_color: str = "#a1d99b",
+    use_type_colors: bool = True,
+    thickness: int = 2,
+    boundary_colors: Dict[str, str] | None = None,
+    line_style: str = "-",
+) -> np.ndarray:
+    """Draw Region boundaries on an existing source-sized RGB canvas."""
+
+    rgb = np.asarray(base_rgb, dtype=float).copy()
+    if rgb.ndim != 3 or rgb.shape[2] != 3:
+        raise RuntimeError(f"base_rgb must have shape (height, width, 3), but got {rgb.shape}.")
     name_to_color = _name_to_color(celltype_cfg)
     for type_name in selected_types:
         mask = masks.get(type_name)
         if mask is None:
             continue
-        boundary = _mask_boundary(mask, thickness=thickness)
-        color = name_to_color.get(type_name, boundary_color) if use_type_colors else boundary_color
+        if tuple(mask.shape) != tuple(rgb.shape[:2]):
+            raise RuntimeError(
+                f"Region boundary {type_name!r} has shape {mask.shape}, expected {rgb.shape[:2]}."
+            )
+        boundary = _apply_raster_line_style(_mask_boundary(mask, thickness=thickness), line_style)
+        explicit_color = (boundary_colors or {}).get(str(type_name))
+        color = explicit_color or (name_to_color.get(type_name, boundary_color) if use_type_colors else boundary_color)
         rgb[boundary] = np.array(mcolors.to_rgb(color), dtype=float)
     return np.clip(rgb, 0.0, 1.0)
 
@@ -147,11 +206,16 @@ def make_region_overlay_figure(
     axis_off(ax)
 
     name_to_color = _name_to_color(celltype_cfg)
-    for type_name in selected_types:
-        mask = masks.get(type_name)
-        if mask is None or not np.any(mask):
+    selected_mask_names = [str(name) for name in selected_types if str(name) in masks]
+    visible_masks = (
+        ((name, masks[name]) for name in selected_mask_names)
+        if selected_mask_names
+        else masks.items()
+    )
+    for mask_name, mask in visible_masks:
+        if not np.any(mask):
             continue
-        color = name_to_color.get(type_name, boundary_color) if use_type_colors else boundary_color
+        color = name_to_color.get(mask_name, boundary_color) if use_type_colors else boundary_color
         _plot_mask_contours(
             ax,
             mask=mask,
@@ -359,6 +423,77 @@ def build_region_mask_for_type(
     return get_compute_runtime().labels_in_set(lbl, keep_ids).astype(bool, copy=False)
 
 
+def build_region_mask_from_cell_labels(
+    nuclei_labels: np.ndarray,
+    df_cells: pd.DataFrame,
+    selected_labels: Sequence[int],
+    close_px: int,
+    dilate_px: int,
+    min_area_px: int,
+    min_cells: int,
+) -> np.ndarray:
+    """Rebuild a region from explicitly selected nuclei/cell labels.
+
+    Manual polygon tools select cells by centroid.  This helper turns those
+    selected cells back into a spatial mask and applies the same morphology
+    and component cell-count guard as computational Region analysis.
+    """
+
+    labels = np.asarray(nuclei_labels)
+    if labels.ndim != 2:
+        raise RuntimeError(f"nuclei_labels must be a 2D label image, but got shape={labels.shape}.")
+
+    selected_ids = np.asarray(sorted({int(value) for value in selected_labels if int(value) > 0}), dtype=np.int64)
+    if selected_ids.size == 0:
+        return np.zeros(labels.shape, dtype=bool)
+
+    region = np.isin(labels, selected_ids)
+    close_px = max(0, int(close_px))
+    dilate_px = max(0, int(dilate_px))
+    min_area_px = max(0, int(min_area_px))
+    min_cells = max(1, int(min_cells))
+
+    if close_px > 0:
+        if hasattr(morphology, "isotropic_closing"):
+            region = morphology.isotropic_closing(region, radius=close_px)
+        else:
+            region = morphology.binary_closing(region, footprint=morphology.disk(close_px))
+    region = ndi.binary_fill_holes(region)
+    if min_area_px > 0:
+        region = morphology.remove_small_objects(region, min_size=min_area_px)
+    if dilate_px > 0:
+        if hasattr(morphology, "isotropic_dilation"):
+            region = morphology.isotropic_dilation(region, radius=dilate_px)
+        else:
+            region = morphology.binary_dilation(region, footprint=morphology.disk(dilate_px))
+
+    components = measure.label(region, connectivity=2)
+    if int(components.max()) <= 0:
+        return np.zeros(labels.shape, dtype=bool)
+
+    required_columns = {"label", "centroid_x_px", "centroid_y_px"}
+    if not required_columns.issubset(df_cells.columns):
+        raise RuntimeError(f"df_cells must contain columns: {required_columns}")
+    selected_set = set(int(value) for value in selected_ids.tolist())
+    selected_cells = df_cells[df_cells["label"].astype(int).isin(selected_set)]
+    if selected_cells.empty:
+        return np.zeros(labels.shape, dtype=bool)
+
+    height, width = labels.shape
+    cy = np.clip(np.rint(selected_cells["centroid_y_px"].to_numpy(float)).astype(int), 0, height - 1)
+    cx = np.clip(np.rint(selected_cells["centroid_x_px"].to_numpy(float)).astype(int), 0, width - 1)
+    component_ids = components[cy, cx]
+    component_ids = component_ids[component_ids > 0]
+    if component_ids.size == 0:
+        return np.zeros(labels.shape, dtype=bool)
+    counts = np.bincount(component_ids, minlength=int(components.max()) + 1)
+    keep_ids = np.where(counts >= min_cells)[0]
+    keep_ids = keep_ids[keep_ids > 0]
+    if keep_ids.size == 0:
+        return np.zeros(labels.shape, dtype=bool)
+    return get_compute_runtime().labels_in_set(components, keep_ids).astype(bool, copy=False)
+
+
 def _save_masks_as_uint8(masks: Dict[str, np.ndarray], save_dir: Path, suffix_template: str) -> Dict[str, Path]:
     paths: Dict[str, Path] = {}
     for name, mask in masks.items():
@@ -398,7 +533,8 @@ def _load_boundary_registry(save_dir: Path) -> List[Dict[str, Any]]:
         abs_path = Path(save_dir) / rel_path
         if not abs_path.exists():
             continue
-        cleaned.append(
+        cleaned_record = dict(record)
+        cleaned_record.update(
             {
                 "mask_path": rel_path,
                 "display_name": str(record.get("display_name") or Path(rel_path).stem),
@@ -407,6 +543,7 @@ def _load_boundary_registry(save_dir: Path) -> List[Dict[str, Any]]:
                 "mask_key": str(record.get("mask_key") or ""),
             }
         )
+        cleaned.append(cleaned_record)
     return cleaned
 
 
@@ -494,6 +631,7 @@ def _save_region_like_outputs(
     registry_mask_names: Sequence[str] | None = None,
     replace_registry_group_name: str | None = None,
     replace_registry_source: str | None = None,
+    registry_entry_metadata: Dict[str, Dict[str, Any]] | None = None,
     save_outputs: bool = True,
 ) -> Dict[str, Any]:
     base_prefix = safe_name(base_prefix, "region")
@@ -564,15 +702,17 @@ def _save_region_like_outputs(
             if str(mask_name) not in registry_mask_name_set:
                 continue
             display_name = str(display_name_map.get(mask_name, mask_name)).strip() or str(mask_name)
-            registry_entries.append(
-                {
-                    "mask_path": str(Path(path).relative_to(save_dir)),
-                    "display_name": display_name,
-                    "source": workflow_name,
-                    "group_name": str(base_prefix),
-                    "mask_key": str(mask_name),
-                }
-            )
+            entry = {
+                "mask_path": str(Path(path).relative_to(save_dir)),
+                "display_name": display_name,
+                "source": workflow_name,
+                "group_name": str(base_prefix),
+                "mask_key": str(mask_name),
+            }
+            metadata = (registry_entry_metadata or {}).get(str(mask_name))
+            if isinstance(metadata, dict):
+                entry.update({key: value for key, value in metadata.items() if key != "mask_path"})
+            registry_entries.append(entry)
         registry_path = _update_boundary_registry(
             save_dir,
             registry_entries,
@@ -615,6 +755,8 @@ def save_adjusted_region_analysis(
     boundary_color: str = "#a1d99b",
     use_type_colors: bool = True,
     contour_downsample: int = 1,
+    replace_registry_source: str | None = "manual_boundary_adjustment",
+    registry_entry_metadata: Dict[str, Dict[str, Any]] | None = None,
     save_outputs: bool = True,
 ) -> Dict[str, Any]:
     base_prefix = "adjusted__" + "__".join(sorted(str(name) for name in adjusted_masks.keys())) if adjusted_masks else "adjusted"
@@ -662,7 +804,8 @@ def save_adjusted_region_analysis(
         use_type_colors=use_type_colors,
         contour_downsample=contour_downsample,
         registry_mask_names=edited_mask_names,
-        replace_registry_source="manual_boundary_adjustment",
+        replace_registry_source=replace_registry_source,
+        registry_entry_metadata=registry_entry_metadata,
         save_outputs=save_outputs,
     )
 
@@ -866,6 +1009,7 @@ def run_region_boundary_analysis(
         boundary_color=str(params.boundary_color),
         use_type_colors=bool(params.use_type_colors),
         contour_downsample=int(params.contour_downsample),
+        replace_registry_source="computational_roi_identification",
         save_outputs=save_outputs,
     )
     result["celltype_mask"] = celltype_mask
