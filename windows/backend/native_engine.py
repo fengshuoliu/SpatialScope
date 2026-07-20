@@ -1713,8 +1713,24 @@ class NativeEngine:
             "name": str(item.get("name") or f"Cell type {index + 1}"),
             "color_hex": str(item.get("color_hex") or item.get("colorHex") or COLOR_HEX_LIST[index % len(COLOR_HEX_LIST)]),
             "mode": str(item.get("mode") or "simple"),
-            "all_pos": [str(value) for value in (item.get("all_pos") or item.get("allPositive") or [])],
-            "all_neg": [str(value) for value in (item.get("all_neg") or item.get("allNegative") or [])],
+            "all_pos": [
+                str(value)
+                for value in (
+                    item.get("all_pos")
+                    or item.get("allPositive")
+                    or item.get("allPositiveMarkers")
+                    or []
+                )
+            ],
+            "all_neg": [
+                str(value)
+                for value in (
+                    item.get("all_neg")
+                    or item.get("allNegative")
+                    or item.get("allNegativeMarkers")
+                    or []
+                )
+            ],
             "any_pos_groups": [
                 [str(value) for value in group]
                 for group in (item.get("any_pos_groups") or item.get("anyPositiveGroups") or [])

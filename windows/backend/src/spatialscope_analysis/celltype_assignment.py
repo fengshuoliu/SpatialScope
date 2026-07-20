@@ -115,6 +115,122 @@ from dataclasses import asdict, dataclass, replace
 from itertools import product
 from threadpoolctl import threadpool_limits
 
+try:
+    from numba import njit, prange, set_num_threads
+
+    NUMBA_AVAILABLE = True
+except Exception:  # pragma: no cover - exercised only in reduced dependency installs
+    njit = None
+    prange = range
+    set_num_threads = None
+    NUMBA_AVAILABLE = False
+
+
+def _resolve_buffer_pixels_python(
+    buf_ys: np.ndarray,
+    buf_xs: np.ndarray,
+    img_norm: np.ndarray,
+    owner_map_local: np.ndarray,
+    lab2_local: np.ndarray,
+    nearest_label_map_local: np.ndarray,
+    vote_dys_local: np.ndarray,
+    vote_dxs_local: np.ndarray,
+    cand_dys_local: np.ndarray,
+    cand_dxs_local: np.ndarray,
+    h_local: int,
+    w_local: int,
+) -> np.ndarray:
+    """Reference implementation used when Numba is unavailable."""
+    out = np.zeros(buf_ys.shape[0], np.int32)
+    for i, (y, x) in enumerate(zip(buf_ys, buf_xs)):
+        candidates = set()
+        for dy, dx in zip(cand_dys_local, cand_dxs_local):
+            yy, xx = y + dy, x + dx
+            if 0 <= yy < h_local and 0 <= xx < w_local:
+                lbl = lab2_local[yy, xx]
+                if lbl > 0:
+                    candidates.add(int(lbl))
+        if not candidates:
+            out[i] = int(nearest_label_map_local[y, x])
+            continue
+        best_lbl, best_vote = 0, -1.0
+        for lbl in candidates:
+            vote = 0.0
+            for dy, dx in zip(vote_dys_local, vote_dxs_local):
+                yy, xx = y + dy, x + dx
+                if 0 <= yy < h_local and 0 <= xx < w_local and owner_map_local[yy, xx] == lbl:
+                    vote += float(img_norm[yy, xx])
+            if vote > best_vote:
+                best_vote = vote
+                best_lbl = lbl
+        out[i] = best_lbl or int(nearest_label_map_local[y, x])
+    return out
+
+
+if NUMBA_AVAILABLE:
+
+    @njit(parallel=True, fastmath=True)
+    def _resolve_buffer_pixels_numba(
+        buf_ys,
+        buf_xs,
+        img_norm,
+        owner_map_local,
+        lab2_local,
+        nearest_label_map_local,
+        vote_dys_local,
+        vote_dxs_local,
+        cand_dys_local,
+        cand_dxs_local,
+        h_local,
+        w_local,
+    ):
+        """Compiled once per process, then shared by every optimizer candidate."""
+        max_cands = 8
+        out = np.zeros(buf_ys.shape[0], np.int32)
+        for i in prange(buf_ys.shape[0]):
+            y = buf_ys[i]
+            x = buf_xs[i]
+            cand_labels = np.zeros(max_cands, np.int32)
+            n_cand = 0
+            for k in range(cand_dys_local.shape[0]):
+                yy = y + cand_dys_local[k]
+                xx = x + cand_dxs_local[k]
+                if 0 <= yy < h_local and 0 <= xx < w_local:
+                    lbl = lab2_local[yy, xx]
+                    if lbl > 0:
+                        seen = False
+                        for j in range(n_cand):
+                            if cand_labels[j] == lbl:
+                                seen = True
+                                break
+                        if (not seen) and (n_cand < max_cands):
+                            cand_labels[n_cand] = lbl
+                            n_cand += 1
+            if n_cand == 0:
+                out[i] = nearest_label_map_local[y, x]
+                continue
+            best_lbl = 0
+            best_vote = -1.0
+            for j in range(n_cand):
+                lbl = cand_labels[j]
+                vote = 0.0
+                for k in range(vote_dys_local.shape[0]):
+                    yy = y + vote_dys_local[k]
+                    xx = x + vote_dxs_local[k]
+                    if 0 <= yy < h_local and 0 <= xx < w_local:
+                        if owner_map_local[yy, xx] == lbl:
+                            vote += img_norm[yy, xx]
+                if vote > best_vote:
+                    best_vote = vote
+                    best_lbl = lbl
+            if best_lbl == 0:
+                best_lbl = nearest_label_map_local[y, x]
+            out[i] = best_lbl
+        return out
+
+else:
+    _resolve_buffer_pixels_numba = None
+
 
 @dataclass(frozen=True)
 class CelltypeAssignmentParams:
@@ -132,6 +248,208 @@ class CelltypeAssignmentParams:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class CelltypeAssignmentPreparedData:
+    """Read-only full-image work shared by every optimizer candidate."""
+
+    channel_images: Dict[str, np.ndarray]
+    normalized_channel_images: Dict[str, np.ndarray]
+    outside: np.ndarray
+    dist_outside: np.ndarray
+    nearest_label_map: np.ndarray
+    nucleus_area: np.ndarray
+    present_label_ids: np.ndarray
+
+
+def _classify_simple_celltypes_vectorized(
+    df_cells: pd.DataFrame,
+    celltype_cfg: Sequence[Dict[str, Any]],
+    *,
+    min_pos_pix: int,
+    resolve_ambiguous: bool,
+    ambiguous_min_probability: float,
+    ambiguous_min_gap: float,
+) -> Dict[str, Any]:
+    """Classify simple marker rules without per-cell pandas row access.
+
+    The optimizer evaluates the same rules for thousands of nuclei many times.
+    Building one ``cells x cell-types`` Boolean matrix preserves the original
+    ordered matching and ambiguity semantics while moving the numeric work into
+    NumPy's compiled loops. Expression-mode rules continue to use the scalar
+    implementation because arbitrary Python expressions cannot be safely
+    vectorized here.
+    """
+    n_cells = int(len(df_cells))
+    n_types = int(len(celltype_cfg))
+    if n_types <= 0:
+        raise RuntimeError("CELLTYPE_CFG is empty.")
+    if any(str(cell_type.get("mode", "simple")) != "simple" for cell_type in celltype_cfg):
+        raise ValueError("Vectorized classification only supports simple cell-type rules.")
+
+    def numeric_column(name: str) -> np.ndarray:
+        if name not in df_cells.columns:
+            return np.zeros(n_cells, dtype=np.float64)
+        return df_cells[name].to_numpy(dtype=np.float64, copy=False)
+
+    marker_positive_cache: Dict[str, np.ndarray] = {}
+    marker_probability_cache: Dict[str, np.ndarray] = {}
+
+    def marker_positive(marker_key: str) -> np.ndarray:
+        cached = marker_positive_cache.get(marker_key)
+        if cached is not None:
+            return cached
+        if marker_key == NUC_KEY:
+            if "NUCLEUS_pos" in df_cells.columns:
+                values = df_cells["NUCLEUS_pos"].to_numpy(dtype=bool, copy=False)
+            else:
+                values = numeric_column("NUCLEUS_pos_pix") > 0
+        else:
+            column = f"{marker_key}_pos"
+            values = (
+                df_cells[column].to_numpy(dtype=bool, copy=False)
+                if column in df_cells.columns
+                else np.zeros(n_cells, dtype=bool)
+            )
+        marker_positive_cache[marker_key] = values
+        return values
+
+    def marker_probability(marker_key: str) -> np.ndarray:
+        cached = marker_probability_cache.get(marker_key)
+        if cached is not None:
+            return cached
+        if marker_key == NUC_KEY:
+            values = (numeric_column("NUCLEUS_pos_pix") > 0).astype(np.float64)
+        else:
+            pixel_count = np.maximum(0.0, numeric_column(f"{marker_key}_pos_pix"))
+            intensity = np.maximum(0.0, numeric_column(f"{marker_key}_sum_intensity"))
+            scale_pixels = max(1.0, float(max(int(min_pos_pix), 1)))
+            pixel_probability = 1.0 - np.exp(-pixel_count / scale_pixels)
+            intensity_probability = 1.0 - np.exp(
+                -intensity / max(1.0, scale_pixels / 2.0)
+            )
+            values = np.clip(
+                0.65 * pixel_probability + 0.35 * intensity_probability,
+                0.0,
+                1.0,
+            )
+        marker_probability_cache[marker_key] = values
+        return values
+
+    matches = np.ones((n_cells, n_types), dtype=bool)
+    type_scores = np.empty((n_cells, n_types), dtype=np.float64)
+    type_names = np.asarray([str(cell_type["name"]) for cell_type in celltype_cfg], dtype=object)
+
+    for type_index, cell_type in enumerate(celltype_cfg):
+        all_positive = [marker_name_to_key(marker) for marker in cell_type.get("all_pos", [])]
+        all_negative = [marker_name_to_key(marker) for marker in cell_type.get("all_neg", [])]
+        any_positive_groups = [
+            [marker_name_to_key(marker) for marker in group]
+            for group in cell_type.get("any_pos_groups", [])
+        ]
+
+        type_matches = matches[:, type_index]
+        probability_terms: List[np.ndarray] = []
+        for marker_key in all_positive:
+            type_matches &= marker_positive(marker_key)
+            probability_terms.append(marker_probability(marker_key))
+        for marker_key in all_negative:
+            type_matches &= ~marker_positive(marker_key)
+            probability_terms.append(np.clip(1.0 - marker_probability(marker_key), 0.0, 1.0))
+        for group in any_positive_groups:
+            if not group:
+                continue
+            group_matches = np.zeros(n_cells, dtype=bool)
+            group_probabilities = np.zeros(n_cells, dtype=np.float64)
+            for marker_key in group:
+                group_matches |= marker_positive(marker_key)
+                group_probabilities = np.maximum(group_probabilities, marker_probability(marker_key))
+            type_matches &= group_matches
+            probability_terms.append(group_probabilities)
+
+        if probability_terms:
+            log_sum = np.zeros(n_cells, dtype=np.float64)
+            for term in probability_terms:
+                log_sum += np.log(np.clip(term, 1e-6, 1.0))
+            type_scores[:, type_index] = np.exp(log_sum / float(len(probability_terms)))
+        else:
+            type_scores[:, type_index] = 0.5
+
+    n_matched = matches.sum(axis=1, dtype=np.int32)
+    celltype_id = np.zeros(n_cells, dtype=np.uint16)
+    celltype_name = np.full(n_cells, "Unassigned", dtype=object)
+    ambiguous_best_type = np.full(n_cells, "", dtype=object)
+    ambiguous_best_probability = np.zeros(n_cells, dtype=np.float64)
+    ambiguous_second_probability = np.zeros(n_cells, dtype=np.float64)
+    ambiguous_probability_gap = np.zeros(n_cells, dtype=np.float64)
+    ambiguous_candidate_probabilities = np.full(n_cells, "", dtype=object)
+
+    matched_indices = [np.flatnonzero(row) for row in matches]
+    matched_celltypes = ["|".join(type_names[indices].tolist()) for indices in matched_indices]
+
+    uniquely_matched_rows = np.flatnonzero(n_matched == 1)
+    if uniquely_matched_rows.size:
+        unique_type_indices = np.argmax(matches[uniquely_matched_rows], axis=1)
+        celltype_id[uniquely_matched_rows] = (unique_type_indices + 1).astype(np.uint16)
+        celltype_name[uniquely_matched_rows] = type_names[unique_type_indices]
+
+    ambiguous_rows = np.flatnonzero(n_matched > 1)
+    if ambiguous_rows.size:
+        candidate_scores = np.where(matches, np.maximum(type_scores, 1e-6), 0.0)
+        total_scores = np.zeros(n_cells, dtype=np.float64)
+        # Ordered accumulation matches Python's original left-to-right ``sum``.
+        for type_index in range(n_types):
+            total_scores += candidate_scores[:, type_index]
+        probabilities = np.divide(
+            candidate_scores,
+            total_scores[:, None],
+            out=np.zeros_like(candidate_scores),
+            where=total_scores[:, None] > 0,
+        )
+
+        for row_index in ambiguous_rows.tolist():
+            candidate_indices = matched_indices[row_index]
+            ordered_indices = sorted(
+                candidate_indices.tolist(),
+                key=lambda type_index: float(probabilities[row_index, type_index]),
+                reverse=True,
+            )
+            best_type_index = ordered_indices[0]
+            best_probability = float(probabilities[row_index, best_type_index])
+            second_probability = float(probabilities[row_index, ordered_indices[1]])
+            probability_gap = best_probability - second_probability
+
+            ambiguous_best_type[row_index] = type_names[best_type_index]
+            ambiguous_best_probability[row_index] = best_probability
+            ambiguous_second_probability[row_index] = second_probability
+            ambiguous_probability_gap[row_index] = probability_gap
+            ambiguous_candidate_probabilities[row_index] = "; ".join(
+                f"{type_names[type_index]}={probabilities[row_index, type_index]:.3f}"
+                for type_index in ordered_indices
+            )
+
+            if (
+                resolve_ambiguous
+                and best_probability >= float(ambiguous_min_probability)
+                and probability_gap >= float(ambiguous_min_gap)
+            ):
+                celltype_id[row_index] = np.uint16(best_type_index + 1)
+                celltype_name[row_index] = type_names[best_type_index]
+            else:
+                celltype_name[row_index] = "Ambiguous"
+
+    return {
+        "celltype_id": celltype_id.astype(int),
+        "celltype": celltype_name,
+        "matched_celltypes": matched_celltypes,
+        "n_matched_celltypes": n_matched.astype(int),
+        "ambiguous_best_type": ambiguous_best_type,
+        "ambiguous_best_probability": ambiguous_best_probability,
+        "ambiguous_second_probability": ambiguous_second_probability,
+        "ambiguous_probability_gap": ambiguous_probability_gap,
+        "ambiguous_candidate_probabilities": ambiguous_candidate_probabilities.tolist(),
+    }
 
 
 CELLTYPE_PARAM_ORDER = [
@@ -260,6 +578,87 @@ def _coerce_assignment_params(
         return CelltypeAssignmentParams(**payload)
     raise TypeError(f"Unsupported assignment params type: {type(params)!r}")
 
+
+def prepare_celltype_assignment_optimizer_data(
+    *,
+    folder: Path,
+    image_id: str,
+    channels_cfg: Sequence[Dict[str, Any]],
+    celltype_cfg: Sequence[Dict[str, Any]],
+    labels: np.ndarray,
+    df_pixels: pd.DataFrame | None = None,
+    shapes: Dict[Tuple[str, str], Tuple[int, int]] | None = None,
+) -> CelltypeAssignmentPreparedData:
+    """Prepare immutable inputs once instead of once per parameter candidate."""
+    labels = np.asarray(labels, dtype=np.int32)
+    if labels.ndim != 2:
+        raise RuntimeError(f"Nuclei labels must be a 2D label image, got shape={labels.shape}")
+    n_labels = int(labels.max())
+    if n_labels <= 0:
+        raise RuntimeError("No nuclei labels were found in the current label mask.")
+
+    folder = Path(folder)
+    ch2file = {str(c["channel"]): (folder / str(c["file"])) for c in channels_cfg}
+    required_marker_keys = {
+        marker_name_to_key(marker)
+        for cell_type in celltype_cfg
+        for marker in (
+            list(cell_type.get("all_pos", []))
+            + list(cell_type.get("all_neg", []))
+            + [
+                grouped_marker
+                for group in cell_type.get("any_pos_groups", [])
+                for grouped_marker in group
+            ]
+        )
+        if marker_name_to_key(marker) != NUC_KEY
+    }
+    assign_channels = [
+        channel_name
+        for channel_name in ch2file
+        if marker_name_to_key(channel_name) in required_marker_keys
+    ]
+
+    channel_images: Dict[str, np.ndarray] = {}
+    normalized_channel_images: Dict[str, np.ndarray] = {}
+    for channel_name in assign_channels:
+        image: np.ndarray | None = None
+        if df_pixels is not None and shapes is not None:
+            try:
+                image = to_image(df_pixels, shapes, image_id, channel_name).astype(np.float32)
+            except Exception:
+                image = None
+        if image is None:
+            path = ch2file.get(channel_name)
+            if path is None or not path.exists():
+                raise FileNotFoundError(f"Channel {channel_name!r} file not found in CFG/Folder.")
+            image = load_text_grid(path).astype(np.float32, copy=False)
+        channel_images[channel_name] = image
+        low, high = np.nanpercentile(image, [1, 99.8])
+        normalized_channel_images[channel_name] = np.clip(
+            (image - low) / max(high - low, 1e-6),
+            0,
+            1,
+        )
+
+    outside = labels == 0
+    dist_outside, indexes = ndi.distance_transform_edt(outside, return_indices=True)
+    nearest_label_map = labels[indexes[0], indexes[1]]
+    nucleus_area = np.bincount(
+        labels.ravel().astype(np.int64),
+        minlength=n_labels + 1,
+    ).astype(np.int64)
+    present_label_ids = np.flatnonzero(nucleus_area[1:] > 0).astype(np.int64) + 1
+    return CelltypeAssignmentPreparedData(
+        channel_images=channel_images,
+        normalized_channel_images=normalized_channel_images,
+        outside=outside,
+        dist_outside=dist_outside,
+        nearest_label_map=nearest_label_map,
+        nucleus_area=nucleus_area,
+        present_label_ids=present_label_ids,
+    )
+
 def _run_celltype_assignment_impl(
     folder: Path,
     save_dir: Path,
@@ -275,6 +674,8 @@ def _run_celltype_assignment_impl(
     make_figures: bool = True,
     native_threads: int | None = None,
     support_workers: int | None = None,
+    summary_only: bool = False,
+    prepared_data: CelltypeAssignmentPreparedData | None = None,
 ) -> Dict[str, Any]:
     if not celltype_cfg:
         raise RuntimeError("CELLTYPE_CFG is empty.")
@@ -318,6 +719,8 @@ def _run_celltype_assignment_impl(
     nuc_channel = guess_nuclear_channel(channel_names)
 
     def get_channel_image(channel_name: str) -> np.ndarray:
+        if prepared_data is not None and channel_name in prepared_data.channel_images:
+            return prepared_data.channel_images[channel_name]
         if df_pixels is not None and shapes is not None:
             try:
                 return to_image(df_pixels, shapes, image_id, channel_name).astype(np.float32)
@@ -342,10 +745,15 @@ def _run_celltype_assignment_impl(
     min_pos_pix = max(0, int(params.min_pos_pix))
     min_pos_object_size_px = max(0, int(params.min_pos_object_size_px))
 
-    outside = labels == 0
-    dist_outside, idxs = ndi.distance_transform_edt(outside, return_indices=True)
-    iy, ix = idxs
-    nearest_label_map = labels[iy, ix]
+    if prepared_data is None:
+        outside = labels == 0
+        dist_outside, idxs = ndi.distance_transform_edt(outside, return_indices=True)
+        iy, ix = idxs
+        nearest_label_map = labels[iy, ix]
+    else:
+        outside = prepared_data.outside
+        dist_outside = prepared_data.dist_outside
+        nearest_label_map = prepared_data.nearest_label_map
     voronoi_band = outside & (dist_outside <= r_voronoi_px)
 
     lab2 = segmentation.expand_labels(labels, distance=r_buffer_px)
@@ -364,122 +772,24 @@ def _run_celltype_assignment_impl(
     vote_dys, vote_dxs = disk_offsets(r_vote_px)
     cand_dys, cand_dxs = disk_offsets(r_buffer_px)
 
-    try:
-        from numba import njit, prange, set_num_threads
-
+    if NUMBA_AVAILABLE and set_num_threads is not None:
         try:
             set_num_threads(numba_threads)
         except Exception:
             pass
-        numba_ok = True
-    except Exception:
-        numba_ok = False
+    resolve_buffer_pixels = (
+        _resolve_buffer_pixels_numba
+        if NUMBA_AVAILABLE and _resolve_buffer_pixels_numba is not None
+        else _resolve_buffer_pixels_python
+    )
 
-    if numba_ok:
-
-        @njit(parallel=True, fastmath=True)
-        def resolve_buffer_pixels(
-            buf_ys,
-            buf_xs,
-            img_norm,
-            owner_map_local,
-            lab2_local,
-            nearest_label_map_local,
-            vote_dys_local,
-            vote_dxs_local,
-            cand_dys_local,
-            cand_dxs_local,
-            h_local,
-            w_local,
-        ):
-            max_cands = 8
-            out = np.zeros(buf_ys.shape[0], np.int32)
-            for i in prange(buf_ys.shape[0]):
-                y = buf_ys[i]
-                x = buf_xs[i]
-                cand_labels = np.zeros(max_cands, np.int32)
-                n_cand = 0
-                for k in range(cand_dys_local.shape[0]):
-                    yy = y + cand_dys_local[k]
-                    xx = x + cand_dxs_local[k]
-                    if 0 <= yy < h_local and 0 <= xx < w_local:
-                        lbl = lab2_local[yy, xx]
-                        if lbl > 0:
-                            seen = False
-                            for j in range(n_cand):
-                                if cand_labels[j] == lbl:
-                                    seen = True
-                                    break
-                            if (not seen) and (n_cand < max_cands):
-                                cand_labels[n_cand] = lbl
-                                n_cand += 1
-                if n_cand == 0:
-                    out[i] = nearest_label_map_local[y, x]
-                    continue
-                best_lbl = 0
-                best_vote = -1.0
-                for j in range(n_cand):
-                    lbl = cand_labels[j]
-                    vote = 0.0
-                    for k in range(vote_dys_local.shape[0]):
-                        yy = y + vote_dys_local[k]
-                        xx = x + vote_dxs_local[k]
-                        if 0 <= yy < h_local and 0 <= xx < w_local:
-                            if owner_map_local[yy, xx] == lbl:
-                                vote += img_norm[yy, xx]
-                    if vote > best_vote:
-                        best_vote = vote
-                        best_lbl = lbl
-                if best_lbl == 0:
-                    best_lbl = nearest_label_map_local[y, x]
-                out[i] = best_lbl
-            return out
-
-    else:
-
-        def resolve_buffer_pixels(
-            buf_ys,
-            buf_xs,
-            img_norm,
-            owner_map_local,
-            lab2_local,
-            nearest_label_map_local,
-            vote_dys_local,
-            vote_dxs_local,
-            cand_dys_local,
-            cand_dxs_local,
-            h_local,
-            w_local,
-        ):
-            out = np.zeros(buf_ys.shape[0], np.int32)
-            for i, (y, x) in enumerate(zip(buf_ys, buf_xs)):
-                candidates = set()
-                for dy, dx in zip(cand_dys_local, cand_dxs_local):
-                    yy, xx = y + dy, x + dx
-                    if 0 <= yy < h_local and 0 <= xx < w_local:
-                        lbl = lab2_local[yy, xx]
-                        if lbl > 0:
-                            candidates.add(int(lbl))
-                if not candidates:
-                    out[i] = int(nearest_label_map_local[y, x])
-                    continue
-                best_lbl, best_vote = 0, -1.0
-                for lbl in candidates:
-                    vote = 0.0
-                    for dy, dx in zip(vote_dys_local, vote_dxs_local):
-                        yy, xx = y + dy, x + dx
-                        if 0 <= yy < h_local and 0 <= xx < w_local and owner_map_local[yy, xx] == lbl:
-                            vote += float(img_norm[yy, xx])
-                    if vote > best_vote:
-                        best_vote = vote
-                        best_lbl = lbl
-                out[i] = best_lbl or int(nearest_label_map_local[y, x])
-            return out
-
-    def preprocess_marker(img: np.ndarray) -> np.ndarray:
-        img = img.astype(np.float32, copy=False)
-        lo, hi = np.nanpercentile(img, [1, 99.8])
-        norm = np.clip((img - lo) / max(hi - lo, 1e-6), 0, 1)
+    def preprocess_marker(img: np.ndarray, marker_display_name: str) -> np.ndarray:
+        if prepared_data is not None and marker_display_name in prepared_data.normalized_channel_images:
+            norm = prepared_data.normalized_channel_images[marker_display_name]
+        else:
+            img = img.astype(np.float32, copy=False)
+            lo, hi = np.nanpercentile(img, [1, 99.8])
+            norm = np.clip((img - lo) / max(hi - lo, 1e-6), 0, 1)
         if tophat_px > 0:
             norm = morphology.white_tophat(norm, footprint=morphology.disk(tophat_px))
         if gauss_sigma > 0:
@@ -531,7 +841,7 @@ def _run_celltype_assignment_impl(
         if marker_key == NUC_KEY:
             raise ValueError("Do not run marker assignment for nucleus (built-in).")
 
-        img_norm = preprocess_marker(img)
+        img_norm = preprocess_marker(img, marker_display_name)
         pos_mask, thr = marker_positive_mask(img_norm)
         threshold_rows.append(
             {
@@ -642,7 +952,25 @@ def _run_celltype_assignment_impl(
 
         return out.sort_values("label").reset_index(drop=True)
 
-    df_props = build_df_props_from_current_labels(labels)
+    if summary_only:
+        if prepared_data is not None:
+            present_label_ids = prepared_data.present_label_ids
+        else:
+            present_label_ids = np.flatnonzero(
+                np.bincount(labels.ravel().astype(np.int64), minlength=n_labels + 1)[1:] > 0
+            ).astype(np.int64) + 1
+        # Optimizer scoring only consumes label identities and marker evidence.
+        # Full morphology/centroid extraction and support-mask rendering are
+        # deliberately reserved for the final assignment run.
+        df_props = pd.DataFrame(
+            {
+                "label": present_label_ids.astype(int),
+                "centroid_x_px": np.zeros(len(present_label_ids), dtype=float),
+                "centroid_y_px": np.zeros(len(present_label_ids), dtype=float),
+            }
+        )
+    else:
+        df_props = build_df_props_from_current_labels(labels)
     if df_props.empty:
         raise RuntimeError("No nuclei properties could be computed. Segmentation labels appear empty.")
 
@@ -651,7 +979,11 @@ def _run_celltype_assignment_impl(
         df_cells = df_cells.merge(dfm, on="label", how="left")
     df_cells.fillna(0, inplace=True)
 
-    nuc_area = np.bincount(labels.ravel().astype(np.int64), minlength=n_labels + 1).astype(np.int64)
+    nuc_area = (
+        prepared_data.nucleus_area
+        if prepared_data is not None
+        else np.bincount(labels.ravel().astype(np.int64), minlength=n_labels + 1).astype(np.int64)
+    )
     lab_idx = df_cells["label"].to_numpy(np.int64)
 
     if len(lab_idx) == 0:
@@ -787,76 +1119,101 @@ def _run_celltype_assignment_impl(
         return float(np.clip(eval_probability_ast(compiled_expr_ast[ct_index], row), 0.0, 1.0))
 
     k_types = len(celltype_cfg)
-    celltype_id = np.zeros(len(df_cells), dtype=np.uint16)
-    celltype_name = np.array(["Unassigned"] * len(df_cells), dtype=object)
-    matched_celltypes: List[str] = []
-    n_matched_celltypes = np.zeros(len(df_cells), dtype=np.int32)
-    ambiguous_best_type = np.array([""] * len(df_cells), dtype=object)
-    ambiguous_best_probability = np.zeros(len(df_cells), dtype=float)
-    ambiguous_second_probability = np.zeros(len(df_cells), dtype=float)
-    ambiguous_probability_gap = np.zeros(len(df_cells), dtype=float)
-    ambiguous_candidate_probabilities: List[str] = []
+    if summary_only and all(str(ct.get("mode", "simple")) == "simple" for ct in celltype_cfg):
+        classification = _classify_simple_celltypes_vectorized(
+            df_cells,
+            celltype_cfg,
+            min_pos_pix=min_pos_pix,
+            resolve_ambiguous=bool(params.resolve_ambiguous),
+            ambiguous_min_probability=float(params.ambiguous_min_probability),
+            ambiguous_min_gap=float(params.ambiguous_min_gap),
+        )
+        for column, values in classification.items():
+            df_cells[column] = values
+    else:
+        celltype_id = np.zeros(len(df_cells), dtype=np.uint16)
+        celltype_name = np.array(["Unassigned"] * len(df_cells), dtype=object)
+        matched_celltypes: List[str] = []
+        n_matched_celltypes = np.zeros(len(df_cells), dtype=np.int32)
+        ambiguous_best_type = np.array([""] * len(df_cells), dtype=object)
+        ambiguous_best_probability = np.zeros(len(df_cells), dtype=float)
+        ambiguous_second_probability = np.zeros(len(df_cells), dtype=float)
+        ambiguous_probability_gap = np.zeros(len(df_cells), dtype=float)
+        ambiguous_candidate_probabilities: List[str] = []
 
-    for i in range(len(df_cells)):
-        row = df_cells.iloc[i]
-        matches: List[tuple[int, str, int]] = []
-        for k, ct in enumerate(celltype_cfg, start=1):
-            ct_index = k - 1
-            ok = match_simple(ct, row) if ct.get("mode") == "simple" else match_expr(ct_index, row)
-            if ok:
-                matches.append((k, ct["name"], ct_index))
+        for i in range(len(df_cells)):
+            row = df_cells.iloc[i]
+            matches: List[tuple[int, str, int]] = []
+            for k, ct in enumerate(celltype_cfg, start=1):
+                ct_index = k - 1
+                ok = match_simple(ct, row) if ct.get("mode") == "simple" else match_expr(ct_index, row)
+                if ok:
+                    matches.append((k, ct["name"], ct_index))
 
-        n_matches = len(matches)
-        n_matched_celltypes[i] = n_matches
-        matched_celltypes.append("|".join(name for _, name, _ in matches))
+            n_matches = len(matches)
+            n_matched_celltypes[i] = n_matches
+            matched_celltypes.append("|".join(name for _, name, _ in matches))
 
-        if n_matches == 1:
-            celltype_id[i] = matches[0][0]
-            celltype_name[i] = matches[0][1]
-            ambiguous_candidate_probabilities.append("")
-        elif n_matches == 0:
-            celltype_id[i] = 0
-            celltype_name[i] = "Unassigned"
-            ambiguous_candidate_probabilities.append("")
-        else:
-            candidate_scores: List[tuple[int, str, float]] = []
-            for k, name, ct_index in matches:
-                ct = celltype_cfg[ct_index]
-                score = score_simple_probability(ct, row) if ct.get("mode") == "simple" else score_expr_probability(ct_index, row)
-                candidate_scores.append((k, name, float(max(score, 1e-6))))
-            total_score = float(sum(score for _, _, score in candidate_scores))
-            if total_score <= 0:
-                probabilities = [(k, name, 1.0 / len(candidate_scores)) for k, name, _ in candidate_scores]
-            else:
-                probabilities = [(k, name, score / total_score) for k, name, score in candidate_scores]
-            probabilities = sorted(probabilities, key=lambda item: item[2], reverse=True)
-            best_k, best_name, best_prob = probabilities[0]
-            second_prob = probabilities[1][2] if len(probabilities) > 1 else 0.0
-
-            ambiguous_best_type[i] = best_name
-            ambiguous_best_probability[i] = float(best_prob)
-            ambiguous_second_probability[i] = float(second_prob)
-            ambiguous_probability_gap[i] = float(best_prob - second_prob)
-            ambiguous_candidate_probabilities.append(
-                "; ".join([f"{name}={prob:.3f}" for _, name, prob in probabilities])
-            )
-
-            if params.resolve_ambiguous and best_prob >= float(params.ambiguous_min_probability) and (best_prob - second_prob) >= float(params.ambiguous_min_gap):
-                celltype_id[i] = int(best_k)
-                celltype_name[i] = best_name
-            else:
+            if n_matches == 1:
+                celltype_id[i] = matches[0][0]
+                celltype_name[i] = matches[0][1]
+                ambiguous_candidate_probabilities.append("")
+            elif n_matches == 0:
                 celltype_id[i] = 0
-                celltype_name[i] = "Ambiguous"
+                celltype_name[i] = "Unassigned"
+                ambiguous_candidate_probabilities.append("")
+            else:
+                candidate_scores: List[tuple[int, str, float]] = []
+                for k, name, ct_index in matches:
+                    ct = celltype_cfg[ct_index]
+                    score = score_simple_probability(ct, row) if ct.get("mode") == "simple" else score_expr_probability(ct_index, row)
+                    candidate_scores.append((k, name, float(max(score, 1e-6))))
+                total_score = float(sum(score for _, _, score in candidate_scores))
+                if total_score <= 0:
+                    probabilities = [(k, name, 1.0 / len(candidate_scores)) for k, name, _ in candidate_scores]
+                else:
+                    probabilities = [(k, name, score / total_score) for k, name, score in candidate_scores]
+                probabilities = sorted(probabilities, key=lambda item: item[2], reverse=True)
+                best_k, best_name, best_prob = probabilities[0]
+                second_prob = probabilities[1][2] if len(probabilities) > 1 else 0.0
 
-    df_cells["celltype_id"] = celltype_id.astype(int)
-    df_cells["celltype"] = celltype_name
-    df_cells["matched_celltypes"] = matched_celltypes
-    df_cells["n_matched_celltypes"] = n_matched_celltypes.astype(int)
-    df_cells["ambiguous_best_type"] = ambiguous_best_type
-    df_cells["ambiguous_best_probability"] = ambiguous_best_probability.astype(float)
-    df_cells["ambiguous_second_probability"] = ambiguous_second_probability.astype(float)
-    df_cells["ambiguous_probability_gap"] = ambiguous_probability_gap.astype(float)
-    df_cells["ambiguous_candidate_probabilities"] = ambiguous_candidate_probabilities
+                ambiguous_best_type[i] = best_name
+                ambiguous_best_probability[i] = float(best_prob)
+                ambiguous_second_probability[i] = float(second_prob)
+                ambiguous_probability_gap[i] = float(best_prob - second_prob)
+                ambiguous_candidate_probabilities.append(
+                    "; ".join([f"{name}={prob:.3f}" for _, name, prob in probabilities])
+                )
+
+                if params.resolve_ambiguous and best_prob >= float(params.ambiguous_min_probability) and (best_prob - second_prob) >= float(params.ambiguous_min_gap):
+                    celltype_id[i] = int(best_k)
+                    celltype_name[i] = best_name
+                else:
+                    celltype_id[i] = 0
+                    celltype_name[i] = "Ambiguous"
+
+        df_cells["celltype_id"] = celltype_id.astype(int)
+        df_cells["celltype"] = celltype_name
+        df_cells["matched_celltypes"] = matched_celltypes
+        df_cells["n_matched_celltypes"] = n_matched_celltypes.astype(int)
+        df_cells["ambiguous_best_type"] = ambiguous_best_type
+        df_cells["ambiguous_best_probability"] = ambiguous_best_probability.astype(float)
+        df_cells["ambiguous_second_probability"] = ambiguous_second_probability.astype(float)
+        df_cells["ambiguous_probability_gap"] = ambiguous_probability_gap.astype(float)
+        df_cells["ambiguous_candidate_probabilities"] = ambiguous_candidate_probabilities
+
+    if summary_only:
+        return {
+            "df_cells": df_cells,
+            "counts": df_cells["celltype"].value_counts().rename_axis("celltype").reset_index(name="count"),
+            "celltype_mask": None,
+            "thresholds": pd.DataFrame(threshold_rows),
+            "nuc_channel": nuc_channel,
+            "panel_figure": None,
+            "split_figure": None,
+            "params_used": params.to_dict(),
+            "saved_paths": {},
+        }
 
     celltype_id_by_label = np.zeros(n_labels + 1, dtype=np.uint16)
     lab_ct = df_cells[["label", "celltype_id"]].to_numpy()
@@ -2081,6 +2438,7 @@ def _evaluate_celltype_assignment_combo_chunk(
     native_threads: int | None = 1,
     support_workers: int | None = 1,
     screening_factor: int = 1,
+    prepared_data: CelltypeAssignmentPreparedData | None = None,
 ) -> List[Dict[str, Any]]:
     defined_count_columns = [f"count::{ct['name']}" for ct in celltype_cfg]
     extra_count_columns = ["count::Unassigned", "count::Ambiguous"]
@@ -2113,6 +2471,8 @@ def _evaluate_celltype_assignment_combo_chunk(
                 make_figures=False,
                 native_threads=native_threads,
                 support_workers=support_workers,
+                summary_only=True,
+                prepared_data=prepared_data,
             )
             counts_map = result["counts"].set_index("celltype")["count"].to_dict() if len(result["counts"]) > 0 else {}
             row["n_cells"] = int(len(result["df_cells"]))
@@ -2168,6 +2528,7 @@ def _evaluate_explicit_celltype_assignment_combo_records(
     native_threads_per_worker: int | None = 1,
     support_workers_per_worker: int | None = 1,
     screening_factor: int = 1,
+    prepared_data: CelltypeAssignmentPreparedData | None = None,
 ) -> List[Dict[str, Any]]:
     if not combo_values:
         return []
@@ -2184,6 +2545,17 @@ def _evaluate_explicit_celltype_assignment_combo_records(
     except Exception:
         parallel_workers = 1
     parallel_workers = min(parallel_workers, len(combo_records))
+
+    if prepared_data is None:
+        prepared_data = prepare_celltype_assignment_optimizer_data(
+            folder=folder,
+            image_id=image_id,
+            channels_cfg=channels_cfg,
+            celltype_cfg=celltype_cfg,
+            labels=labels,
+            df_pixels=df_pixels,
+            shapes=shapes,
+        )
 
     if parallel_workers > 1 and Parallel is not None and delayed is not None:
         chunk_size = max(1, min(48, math.ceil(len(combo_records) / max(1, parallel_workers * 4))))
@@ -2216,6 +2588,7 @@ def _evaluate_explicit_celltype_assignment_combo_records(
                     native_threads=native_threads_per_worker,
                     support_workers=support_workers_per_worker,
                     screening_factor=screening_factor,
+                    prepared_data=prepared_data,
                 )
                 for combo_chunk in _iter_assignment_combo_chunks(combo_records, chunk_size)
             )
@@ -2236,6 +2609,7 @@ def _evaluate_explicit_celltype_assignment_combo_records(
         native_threads=native_threads_per_worker,
         support_workers=support_workers_per_worker,
         screening_factor=screening_factor,
+        prepared_data=prepared_data,
     )
 
 
@@ -2526,6 +2900,7 @@ def _run_budgeted_celltype_assignment_search_records(
     support_workers_per_worker: int | None = 1,
     random_seed: int = 42,
     seed_rows: pd.DataFrame | None = None,
+    prepared_data: CelltypeAssignmentPreparedData | None = None,
 ) -> Dict[str, Any]:
     try:
         max_evaluations = max(0, int(max_evaluations))
@@ -2648,6 +3023,7 @@ def _run_budgeted_celltype_assignment_search_records(
             parallel_backend=parallel_backend,
             native_threads_per_worker=native_threads_per_worker,
             support_workers_per_worker=support_workers_per_worker,
+            prepared_data=prepared_data,
         )
         evaluated_rows.extend(batch_rows)
         stage_index += 1
@@ -2687,6 +3063,7 @@ def _run_evolutionary_celltype_assignment_search_records(
     support_workers_per_worker: int | None = 1,
     random_seed: int = 42,
     seed_rows: pd.DataFrame | None = None,
+    prepared_data: CelltypeAssignmentPreparedData | None = None,
 ) -> Dict[str, Any]:
     try:
         max_evaluations = max(0, int(max_evaluations))
@@ -2817,6 +3194,7 @@ def _run_evolutionary_celltype_assignment_search_records(
             parallel_backend=parallel_backend,
             native_threads_per_worker=native_threads_per_worker,
             support_workers_per_worker=support_workers_per_worker,
+            prepared_data=prepared_data,
         )
         evaluated_rows.extend(batch_rows)
         generation_index += 1
@@ -3015,6 +3393,16 @@ def run_celltype_assignment_parameter_optimizer(
         roi_metadata = list(roi_subset.get("roi_metadata", []))
         roi_sampled_area_fraction = float(roi_subset.get("sampled_area_fraction", 1.0))
         roi_mosaic_shape = tuple(int(v) for v in roi_subset.get("mosaic_shape", labels.shape))
+
+    optimizer_prepared_data = prepare_celltype_assignment_optimizer_data(
+        folder=folder,
+        image_id=image_id,
+        channels_cfg=channels_cfg,
+        celltype_cfg=celltype_cfg,
+        labels=optimizer_labels,
+        df_pixels=optimizer_df_pixels,
+        shapes=optimizer_shapes,
+    )
     full_space_n_combinations = _celltype_assignment_search_space_n_combinations(search_space_specs)
     priority_space_n_combinations = (
         _celltype_assignment_search_space_n_combinations(priority_space_specs)
@@ -3068,6 +3456,7 @@ def run_celltype_assignment_parameter_optimizer(
             parallel_backend=parallel_backend,
             native_threads_per_worker=native_threads_per_worker,
             support_workers_per_worker=support_workers_per_worker,
+            prepared_data=optimizer_prepared_data,
         )
         df_results = _deduplicate_celltype_assignment_result_rows(pd.DataFrame(evaluated_rows))
         if len(df_results) > 0:
@@ -3099,6 +3488,7 @@ def run_celltype_assignment_parameter_optimizer(
                 native_threads_per_worker=native_threads_per_worker,
                 support_workers_per_worker=support_workers_per_worker,
                 random_seed=int(random_seed),
+                prepared_data=optimizer_prepared_data,
             )
             priority_results = priority_search_result["results"]
             priority_ranked_results = priority_search_result["ranked_results"]
@@ -3129,6 +3519,7 @@ def run_celltype_assignment_parameter_optimizer(
                 support_workers_per_worker=support_workers_per_worker,
                 random_seed=int(random_seed) + 1,
                 seed_rows=priority_ranked_results,
+                prepared_data=optimizer_prepared_data,
             )
             expansion_results = expansion_search_result["results"]
             evaluated_expansion_combinations = int(expansion_search_result["n_evaluated"])
@@ -3160,6 +3551,7 @@ def run_celltype_assignment_parameter_optimizer(
                 native_threads_per_worker=native_threads_per_worker,
                 support_workers_per_worker=support_workers_per_worker,
                 random_seed=int(random_seed),
+                prepared_data=optimizer_prepared_data,
             )
             df_results = fallback_search_result["results"]
             evaluated_expansion_combinations = int(fallback_search_result["n_evaluated"])

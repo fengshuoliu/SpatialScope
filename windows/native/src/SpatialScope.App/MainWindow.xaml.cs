@@ -22,6 +22,8 @@ namespace SpatialScope.Windows;
 
 public partial class MainWindow : Window
 {
+    private const string NucleusMarker = "Nucleus";
+
     private sealed class Win32DialogOwner(nint handle) : System.Windows.Forms.IWin32Window
     {
         public nint Handle { get; } = handle;
@@ -44,6 +46,7 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<WorkflowSection> _sections = [];
     private readonly ObservableCollection<ChannelRow> _channels = [];
     private readonly ObservableCollection<CellTypeRow> _cellTypes = [];
+    private readonly ObservableCollection<string> _cellTypeMarkerOptions = [NucleusMarker];
     private readonly ObservableCollection<OutputFileRow> _outputFiles = [];
     private readonly Dictionary<string, double> _nucleiValues = ParameterCatalog.Nuclei.ToDictionary(item => item.Key, item => item.DefaultValue);
     private readonly Dictionary<string, double> _assignmentValues = ParameterCatalog.Assignment.ToDictionary(item => item.Key, item => item.DefaultValue);
@@ -77,6 +80,15 @@ public partial class MainWindow : Window
     private bool _isBusy;
     private string? _activeSectionKey;
     private string? _statusResourceKey;
+
+    public IEnumerable<string> CellTypeMarkerOptions => _cellTypeMarkerOptions;
+    public string AllPositivePickerLabel => _localization["AllPositive"];
+    public string AllNegativePickerLabel => _localization["AllNegative"];
+    public string AnyPositivePickerLabel => _localization["AnyPositiveGroups"];
+    public string SelectMarkersText => _localization["SelectMarkers"];
+    public string ClearSelectionText => _localization["ClearSelection"];
+    public string MarkerPickerHelpText => _localization["MarkerPickerHelp"];
+    public string MarkerSelectionCountFormat => _localization["MarkerSelectionCountFormat"];
 
     public MainWindow()
     {
@@ -813,7 +825,7 @@ public partial class MainWindow : Window
                 {
                     Name = item.TryGetProperty("name", out var name) ? name.GetString() ?? string.Empty : string.Empty,
                     ColorHex = item.TryGetProperty("color_hex", out var color) ? color.GetString() ?? "#FFFFFF" : "#FFFFFF",
-                    AllPositive = JoinJsonStrings(item, "all_pos"),
+                    AllPositive = WithDefaultNucleusMarker(JoinJsonStrings(item, "all_pos")),
                     AllNegative = JoinJsonStrings(item, "all_neg"),
                     AnyPositiveGroups = JoinJsonGroups(item, "any_pos_groups"),
                 });
@@ -1435,6 +1447,7 @@ public partial class MainWindow : Window
 
     private UIElement BuildCellTypesView()
     {
+        RefreshCellTypeMarkerOptions();
         EnsureDefaultCellTypes();
         var tabs = new TabControl { Margin = new Thickness(24, 22, 24, 24) };
         tabs.Items.Add(new TabItem { Header = _localization["CellTypeDefinitions"], Content = BuildCellTypeRulesPanel() });
@@ -1453,7 +1466,12 @@ public partial class MainWindow : Window
         var actions = new WrapPanel { Margin = new Thickness(0, 0, 0, 12) };
         actions.Children.Add(CreateButton(_localization["AddCellType"], (_, _) =>
         {
-            _cellTypes.Add(new CellTypeRow { Name = $"Cell type {_cellTypes.Count + 1}", ColorHex = ChannelPalette[(_cellTypes.Count + 2) % ChannelPalette.Length] });
+            _cellTypes.Add(new CellTypeRow
+            {
+                Name = $"Cell type {_cellTypes.Count + 1}",
+                ColorHex = ChannelPalette[(_cellTypes.Count + 2) % ChannelPalette.Length],
+                AllPositive = NucleusMarker,
+            });
             InvalidateCellTypeInputs();
         }));
         actions.Children.Add(CreateButton(_localization["Remove"], (_, _) =>
@@ -1463,7 +1481,7 @@ public partial class MainWindow : Window
             InvalidateCellTypeInputs();
         }));
         stack.Children.Add(actions);
-        var grid = new DataGrid { ItemsSource = _cellTypes, MinHeight = 420 };
+        var grid = new DataGrid { ItemsSource = _cellTypes, MinHeight = 420, RowHeight = 48 };
         grid.CellEditEnding += (_, eventArgs) =>
         {
             if (eventArgs.EditAction == DataGridEditAction.Commit) InvalidateCellTypeInputs();
@@ -1475,21 +1493,42 @@ public partial class MainWindow : Window
             CellTemplate = (DataTemplate)FindResource("ColorEditorTemplate"),
             Width = 86,
         });
-        grid.Columns.Add(new DataGridTextColumn { Header = _localization["AllPositive"], Binding = new Binding(nameof(CellTypeRow.AllPositive)) { UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged }, Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
-        grid.Columns.Add(new DataGridTextColumn { Header = _localization["AllNegative"], Binding = new Binding(nameof(CellTypeRow.AllNegative)) { UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged }, Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
-        grid.Columns.Add(new DataGridTextColumn { Header = _localization["AnyPositiveGroups"], Binding = new Binding(nameof(CellTypeRow.AnyPositiveGroups)) { UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged }, Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
+        grid.Columns.Add(new DataGridTemplateColumn
+        {
+            Header = _localization["AllPositive"],
+            CellTemplate = (DataTemplate)FindResource("AllPositiveMarkerEditorTemplate"),
+            Width = new DataGridLength(1, DataGridLengthUnitType.Star),
+        });
+        grid.Columns.Add(new DataGridTemplateColumn
+        {
+            Header = _localization["AllNegative"],
+            CellTemplate = (DataTemplate)FindResource("AllNegativeMarkerEditorTemplate"),
+            Width = new DataGridLength(1, DataGridLengthUnitType.Star),
+        });
+        grid.Columns.Add(new DataGridTemplateColumn
+        {
+            Header = _localization["AnyPositiveGroups"],
+            CellTemplate = (DataTemplate)FindResource("AnyPositiveMarkerEditorTemplate"),
+            Width = new DataGridLength(1, DataGridLengthUnitType.Star),
+        });
         stack.Children.Add(grid);
         stack.Children.Add(new TextBlock
         {
             Text = _localization.EffectiveLanguage == InterfaceLanguage.SimplifiedChinese
-                ? "用逗号分隔同组标记；任一阳性组之间用竖线“|”分隔。细胞类型和标记名称保持用户输入的语言。"
-                : "Separate markers with commas; separate any-positive groups with a vertical bar (|). User-entered cell type and marker names are never translated.",
+                ? "单击每个标记框可查看所有可用标记，并可选择多个。“全部阳性”需要每个所选标记均为阳性；“任一阳性”只需至少一个所选标记为阳性。"
+                : "Click a marker box to see every available marker and select more than one. All-positive requires every selected marker; Any-positive requires at least one selected marker.",
             FontSize = 12.5,
             Foreground = (Brush)FindResource("SecondaryTextBrush"),
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 10, 0, 0),
         });
         return new ScrollViewer { Content = CreateCard(_localization["CellTypeDefinitions"], stack), VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+    }
+
+    private void CellTypeMarkerSelectionChanged(object sender, RoutedEventArgs e)
+    {
+        InvalidateCellTypeInputs();
+        e.Handled = true;
     }
 
     private UIElement BuildAssignmentPanel()
@@ -2025,18 +2064,68 @@ public partial class MainWindow : Window
 
     private void EnsureDefaultCellTypes()
     {
+        RefreshCellTypeMarkerOptions();
         if (_cellTypes.Count > 0 || _channels.Count == 0) return;
-        foreach (var channel in _channels.Where(channel => channel.Marker != _nucleusChannel))
+        foreach (var channel in _channels.Where(channel =>
+                     !string.IsNullOrWhiteSpace(channel.Marker)
+                     && !string.Equals(channel.Marker, _nucleusChannel, StringComparison.OrdinalIgnoreCase)))
         {
             _cellTypes.Add(new CellTypeRow
             {
                 Name = channel.Marker,
                 ColorHex = channel.ColorHex,
-                AllPositive = $"nucleus, {channel.Marker}",
+                AllPositive = WithDefaultNucleusMarker(channel.Marker),
                 AllNegative = string.Empty,
                 AnyPositiveGroups = string.Empty,
             });
         }
+    }
+
+    private void RefreshCellTypeMarkerOptions()
+    {
+        var options = new List<string>();
+        var canonicalNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        void AddOption(string? value)
+        {
+            var marker = value?.Trim() ?? string.Empty;
+            if (marker.Length == 0) return;
+            var canonical = CanonicalMarkerName(marker);
+            if (canonical.Length == 0 || !canonicalNames.Add(canonical)) return;
+            options.Add(canonical == "nucleus" ? NucleusMarker : marker);
+        }
+
+        AddOption(NucleusMarker);
+        foreach (var channel in _channels)
+        {
+            // Keep every source marker selectable. The derived Nucleus option
+            // is separate evidence produced by segmentation and remains the
+            // default All-positive rule for each cell type.
+            AddOption(channel.Marker);
+        }
+
+        if (_cellTypeMarkerOptions.SequenceEqual(options, StringComparer.Ordinal)) return;
+        _cellTypeMarkerOptions.Clear();
+        foreach (var option in options) _cellTypeMarkerOptions.Add(option);
+    }
+
+    private static string WithDefaultNucleusMarker(string? selection)
+    {
+        var markers = new List<string> { NucleusMarker };
+        var canonicalNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "nucleus" };
+        foreach (var marker in SplitMarkers(selection ?? string.Empty))
+        {
+            var canonical = CanonicalMarkerName(marker);
+            if (canonical.Length == 0 || !canonicalNames.Add(canonical)) continue;
+            markers.Add(canonical == "nucleus" ? NucleusMarker : marker);
+        }
+        return string.Join(", ", markers);
+    }
+
+    private static string CanonicalMarkerName(string value)
+    {
+        var canonical = string.Concat(value.Where(char.IsLetterOrDigit)).ToLowerInvariant();
+        return canonical is "nuclearsegmentationsignal" or "nucleus" ? "nucleus" : canonical;
     }
 
     private void CaptureExportPaths(JsonElement result)
