@@ -10,9 +10,65 @@
         <SolidColorBrush x:Key="RunningBrush" Color="#EF8A17" />
         <SolidColorBrush x:Key="CompleteBrush" Color="#2F9E5B" />
         <SolidColorBrush x:Key="ErrorBrush" Color="#C73E4D" />
+        <SolidColorBrush x:Key="FocusBrush" Color="#B45309" />
         <SolidColorBrush x:Key="TextBrush" Color="#182126" />
         <SolidColorBrush x:Key="SecondaryTextBrush" Color="#647178" />
+        <SolidColorBrush x:Key="MutedTextBrush" Color="#59666C" />
         <SolidColorBrush x:Key="PanelBorderBrush" Color="#D6DEE1" />
         <SolidColorBrush x:Key="PanelBrush" Color="#F9FFFFFF" />
+
+        <!-- SpatialScope type scale. Keep these roles shared by XAML and
+             code-built views so nested headings never fall below body text. -->
+        <Style x:Key="BodyTextStyle" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="{DynamicResource InterfaceFont}" />
+            <Setter Property="FontSize" Value="14" />
+        </Style>
+
+        <Style TargetType="TextBlock" BasedOn="{StaticResource BodyTextStyle}" />
+
+        <Style x:Key="PageTitleTextStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyTextStyle}">
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+            <Setter Property="FontFamily" Value="{DynamicResource DisplayFont}" />
+            <Setter Property="FontSize" Value="25" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+
+        <Style x:Key="CardTitleTextStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyTextStyle}">
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+            <Setter Property="FontFamily" Value="{DynamicResource DisplayFont}" />
+            <Setter Property="FontSize" Value="18" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Margin" Value="0,0,0,14" />
+        </Style>
+
+        <Style x:Key="SubsectionTitleTextStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyTextStyle}">
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+            <Setter Property="FontFamily" Value="{DynamicResource DisplayFont}" />
+            <Setter Property="FontSize" Value="15" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+
+        <Style x:Key="FieldLabelTextStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyTextStyle}">
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+
+        <Style x:Key="SupportingTextStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyTextStyle}">
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="Foreground" Value="{DynamicResource SecondaryTextBrush}" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+        </Style>
+
+        <Style x:Key="CaptionTextStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyTextStyle}">
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="FontWeight" Value="Medium" />
+            <Setter Property="Foreground" Value="{DynamicResource SecondaryTextBrush}" />
+        </Style>
+
+        <Style x:Key="StatusTextStyle" TargetType="TextBlock" BasedOn="{StaticResource BodyTextStyle}">
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
     </Application.Resources>
 </Application>

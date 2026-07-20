@@ -294,7 +294,25 @@ public partial class MarkerMultiSelectBox : UserControl
         SetValue(SelectionCountTextPropertyKey, countText);
     }
 
-    private void MarkerCheckBox_Click(object sender, RoutedEventArgs e) => CommitSelection();
+    private void ToggleMarkerOption(object sender)
+    {
+        if (sender is not CheckBox { DataContext: MarkerOption option }) return;
+        option.IsSelected = !option.IsSelected;
+        CommitSelection();
+    }
+
+    private void MarkerCheckBox_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        ToggleMarkerOption(sender);
+        e.Handled = true;
+    }
+
+    private void MarkerCheckBox_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Space) return;
+        ToggleMarkerOption(sender);
+        e.Handled = true;
+    }
 
     private void ClearButton_Click(object sender, RoutedEventArgs e)
     {

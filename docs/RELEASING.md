@@ -1,6 +1,6 @@
 # Release SpatialScope Through GitHub
 
-SpatialScope distributes ad-hoc-signed macOS builds and unsigned Windows x64 builds through GitHub Releases. The platforms release independently: macOS 1.2.1 uses Sparkle for updates, while Windows 1.2.1 is a native WPF application distributed with a setup executable. Apple Developer Program and commercial Windows code-signing memberships are not required. Users approve the app once through macOS Privacy & Security or Windows SmartScreen.
+SpatialScope distributes ad-hoc-signed macOS builds and unsigned Windows x64 builds through GitHub Releases. The platforms release independently: macOS 1.2.1 uses Sparkle for updates, while Windows 1.2.2 is a native WPF application distributed with a setup executable. Apple Developer Program and commercial Windows code-signing memberships are not required. Users approve the app once through macOS Privacy & Security or Windows SmartScreen.
 
 ## Platform versions and tags
 
@@ -9,10 +9,10 @@ SpatialScope distributes ad-hoc-signed macOS builds and unsigned Windows x64 bui
 - A Windows-only release must not change the Xcode version, macOS artifacts, or Sparkle appcast.
 - A Windows-only release must set GitHub's `make_latest` value to `false`, so the current macOS release remains the repository's Latest release.
 
-For Windows 1.2.1, use the tag `windows-v1.2.1`. Its stable download URL is:
+For Windows 1.2.2, use the tag `windows-v1.2.2`. Its stable download URL is:
 
 ```text
-https://github.com/fengshuoliu/SpatialScope/releases/download/windows-v1.2.1/SpatialScope-Windows-x64-Setup.exe
+https://github.com/fengshuoliu/SpatialScope/releases/download/windows-v1.2.2/SpatialScope-Windows-x64-Setup.exe
 ```
 
 The macOS download URL continues to use GitHub's Latest release:
@@ -144,7 +144,7 @@ Inspect `docs/appcast.xml` before publishing. It must contain the new version, b
 7. Do not regenerate or commit `docs/appcast.xml` for this Windows-only release.
 8. Update public Windows download links to the pinned `windows-v<version>` URL. Do not use `/releases/latest/download/` for a platform-specific Windows asset.
 
-Keep the existing macOS release notes, `v1.2.1` tag, assets, Xcode version, and Sparkle appcast unchanged when publishing Windows 1.2.1.
+Keep the existing macOS release notes, `v1.2.1` tag, assets, Xcode version, and Sparkle appcast unchanged when publishing Windows 1.2.2.
 
 ## Rollback
 

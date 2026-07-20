@@ -24,6 +24,7 @@ from skimage import filters, measure, morphology, segmentation
 
 from .compute_runtime import get_compute_runtime
 from .io import load_any_tiff, load_text_grid, save_uint16_tiff, write_json
+from .nuclei_segmentation import _swift_round_nonnegative, _truncated_box_blur
 from .visualization import (
     add_colored_type_text,
     add_scalebar_20um,
@@ -73,6 +74,55 @@ def safe_key(name: str) -> str:
 
 
 NUC_KEY = "NUCLEUS"
+MAX_NATIVE_VOTING_RADIUS_PX = 24
+MAX_ASSIGNMENT_TOPHAT_RADIUS_PX = 160
+MAX_ASSIGNMENT_SMOOTHING_RADIUS_PX = 32
+
+
+def _assignment_disk_offsets(radius: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Match the bounded native voting footprint used by the macOS engine."""
+    bounded_radius = min(max(0, int(radius)), MAX_NATIVE_VOTING_RADIUS_PX)
+    yy, xx = np.mgrid[
+        -bounded_radius : bounded_radius + 1,
+        -bounded_radius : bounded_radius + 1,
+    ]
+    mask = (yy * yy + xx * xx) <= bounded_radius * bounded_radius
+    return yy[mask].astype(np.int32), xx[mask].astype(np.int32)
+
+
+def _euclidean_disk_dilation(mask: np.ndarray, radius: int) -> np.ndarray:
+    """Dilate a mask by exact Euclidean distance without constructing a huge disk."""
+    source = np.asarray(mask, dtype=bool)
+    bounded_radius = max(0, int(radius))
+    if bounded_radius <= 0:
+        return source.copy()
+    if not np.any(source):
+        return np.zeros_like(source, dtype=bool)
+    return ndi.distance_transform_edt(~source) <= float(bounded_radius)
+
+
+def _preprocess_assignment_marker(
+    normalized_image: np.ndarray,
+    tophat_radius_px: int,
+    smoothing_radius_px: int,
+) -> np.ndarray:
+    """Apply the same capped, edge-normalized box filters as macOS."""
+    work = np.asarray(normalized_image, dtype=np.float64)
+    if tophat_radius_px > 0:
+        background = _truncated_box_blur(
+            work,
+            min(int(tophat_radius_px), MAX_ASSIGNMENT_TOPHAT_RADIUS_PX),
+        )
+        work = np.maximum(0.0, work - background)
+    if smoothing_radius_px > 0:
+        work = _truncated_box_blur(
+            work,
+            min(
+                max(1, int(smoothing_radius_px)),
+                MAX_ASSIGNMENT_SMOOTHING_RADIUS_PX,
+            ),
+        )
+    return work
 
 
 def marker_name_to_key(marker_name: str) -> str:
@@ -248,6 +298,20 @@ class CelltypeAssignmentParams:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+def _marker_threshold(img_norm: np.ndarray, thresh_mode: str) -> float:
+    """Return the threshold for a marker image while preserving platform parity."""
+    if thresh_mode in {"global_otsu", "local"}:
+        # The macOS assignment engine intentionally maps Local to its Otsu
+        # marker threshold. Keep the mode name in saved parameters while using
+        # the same scientific behavior on Windows.
+        return float(filters.threshold_otsu(img_norm))
+    if thresh_mode == "yen":
+        return float(filters.threshold_yen(img_norm))
+    if thresh_mode == "triangle":
+        return float(filters.threshold_triangle(img_norm))
+    return float(filters.threshold_otsu(img_norm))
 
 
 @dataclass(frozen=True)
@@ -733,14 +797,15 @@ def _run_celltype_assignment_impl(
 
     def um_to_px_iso(value_um: float) -> int:
         scale = np.sqrt(max(1e-12, px_um_x * px_um_y))
-        return max(1, int(round(float(value_um) / scale)))
+        return max(1, _swift_round_nonnegative(float(value_um) / scale))
 
     r_voronoi_px = um_to_px_iso(params.r_voronoi_um)
     r_buffer_px = um_to_px_iso(params.r_buffer_um)
     r_vote_px = um_to_px_iso(params.r_vote_um)
     tophat_px = um_to_px_iso(params.tophat_r_um) if float(params.tophat_r_um) > 0 else 0
-    gauss_sigma = float(params.gauss_sigma_um) / max(1e-12, np.sqrt(px_um_x * px_um_y))
-    gauss_sigma = max(0.0, gauss_sigma)
+    smoothing_radius_px = _swift_round_nonnegative(
+        float(params.gauss_sigma_um) / max(1e-12, np.sqrt(px_um_x * px_um_y))
+    )
     thresh_mode = str(params.thresh_mode)
     min_pos_pix = max(0, int(params.min_pos_pix))
     min_pos_object_size_px = max(0, int(params.min_pos_object_size_px))
@@ -758,19 +823,14 @@ def _run_celltype_assignment_impl(
 
     lab2 = segmentation.expand_labels(labels, distance=r_buffer_px)
     boundaries_thick = segmentation.find_boundaries(lab2, mode="thick")
-    buffer_zone = morphology.binary_dilation(boundaries_thick, morphology.disk(max(1, r_buffer_px // 2)))
+    buffer_zone = _euclidean_disk_dilation(boundaries_thick, max(1, r_buffer_px // 2))
     buffer_zone &= voronoi_band
 
     owner_map = labels.copy()
     owner_map[voronoi_band] = nearest_label_map[voronoi_band]
 
-    def disk_offsets(radius: int) -> Tuple[np.ndarray, np.ndarray]:
-        yy, xx = np.mgrid[-radius : radius + 1, -radius : radius + 1]
-        mask = (yy * yy + xx * xx) <= radius * radius
-        return yy[mask].astype(np.int32), xx[mask].astype(np.int32)
-
-    vote_dys, vote_dxs = disk_offsets(r_vote_px)
-    cand_dys, cand_dxs = disk_offsets(r_buffer_px)
+    vote_dys, vote_dxs = _assignment_disk_offsets(r_vote_px)
+    cand_dys, cand_dxs = _assignment_disk_offsets(r_buffer_px)
 
     if NUMBA_AVAILABLE and set_num_threads is not None:
         try:
@@ -790,21 +850,10 @@ def _run_celltype_assignment_impl(
             img = img.astype(np.float32, copy=False)
             lo, hi = np.nanpercentile(img, [1, 99.8])
             norm = np.clip((img - lo) / max(hi - lo, 1e-6), 0, 1)
-        if tophat_px > 0:
-            norm = morphology.white_tophat(norm, footprint=morphology.disk(tophat_px))
-        if gauss_sigma > 0:
-            norm = filters.gaussian(norm, sigma=gauss_sigma, preserve_range=True)
-        return norm
+        return _preprocess_assignment_marker(norm, tophat_px, smoothing_radius_px)
 
     def marker_positive_mask(img_norm: np.ndarray) -> Tuple[np.ndarray, float]:
-        if thresh_mode == "global_otsu":
-            thr = filters.threshold_otsu(img_norm)
-        elif thresh_mode == "yen":
-            thr = filters.threshold_yen(img_norm)
-        elif thresh_mode == "triangle":
-            thr = filters.threshold_triangle(img_norm)
-        else:
-            thr = filters.threshold_otsu(img_norm)
+        thr = _marker_threshold(img_norm, thresh_mode)
         pos = img_norm > thr
         if min_pos_object_size_px > 1:
             pos = morphology.remove_small_objects(pos, min_size=min_pos_object_size_px)

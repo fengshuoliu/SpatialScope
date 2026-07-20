@@ -173,6 +173,17 @@ def run_smoke(work_root: Path, minimum_speedup: float) -> dict[str, Any]:
             min_pos_pix=6,
             resolve_ambiguous=False,
         ),
+        replace(
+            base_params,
+            r_voronoi_um=2.0,
+            r_buffer_um=232.0,
+            r_vote_um=197.0,
+            tophat_r_um=66.0,
+            gauss_sigma_um=32.5,
+            thresh_mode="local",
+            ambiguous_min_probability=0.01,
+            ambiguous_min_gap=0.0,
+        ),
     ]
 
     common = {

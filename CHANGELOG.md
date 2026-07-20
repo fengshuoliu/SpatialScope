@@ -2,6 +2,15 @@
 
 All notable changes to SpatialScope are documented here.
 
+## 1.2.2 - 2026-07-20 (Windows)
+
+- Reorganized the native Windows interface with a consistent typography scale, clearer section hierarchy, and more readable control spacing.
+- Improved cell-type rule editing with persistent multi-marker selection, clearer marker choices, and the segmented nucleus selected by default for each cell type's all-positive rule.
+- Improved automatic nucleus-channel selection for datasets that use nuclear marker names such as `Ir191_nuclei` instead of DAPI.
+- Matched the macOS cell-assignment parameter ranges, Local threshold option, and bounded fast-filter execution so saved Apple-compatible settings remain editable and practical to optimize on Windows.
+- Preserved and restored completed downstream analysis settings, including neighborhood, region, distribution, and both distance-analysis modes.
+- Expanded Windows workflow validation with packaged-engine, restore-state, and real-dataset coverage while leaving the macOS application unchanged.
+
 ## 1.2.1 - 2026-07-19 (Windows)
 
 - Replaced the legacy Electron/Streamlit Windows shell with a native WPF/.NET desktop application and a private frozen analysis engine.

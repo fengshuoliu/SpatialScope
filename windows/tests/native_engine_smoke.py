@@ -244,38 +244,204 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
         if len(resolved_types) < 3:
             raise AssertionError(f"Expected at least three assigned types, got {resolved_types}")
 
-        neighborhood = engine.request("neighborhood", {"gridSizeUm": 24.0})
-        assert_default_compute_usage(neighborhood, "neighborhood")
-        if int(neighborhood["summary"]["clusterCount"]) < 1:
+        workflow_state_path = output_folder / "00_config" / "windows_session_state.json"
+        neighborhood_probe = engine.request("neighborhood", {"gridSizeUm": 24.0})
+        assert_default_compute_usage(neighborhood_probe, "neighborhood")
+        if int(neighborhood_probe["summary"]["clusterCount"]) < 1:
             raise AssertionError("Neighborhood analysis did not produce clusters.")
+        neighborhood_labels = [str(value) for value in neighborhood_probe["clusterLabels"]]
+        neighborhood_colors = {
+            label: f"#{((index + 1) * 0x234567) % 0xFFFFFF:06X}"
+            for index, label in enumerate(neighborhood_labels)
+        }
+        neighborhood_payload = {
+            "gridSizeUm": 24.0,
+            "clusterColors": neighborhood_colors,
+            "displayClusters": [*reversed(neighborhood_labels), neighborhood_labels[-1]],
+        }
+        neighborhood = engine.request("neighborhood", neighborhood_payload)
+        assert_default_compute_usage(neighborhood, "neighborhood")
+        expected_neighborhood_parameters = {
+            "gridSizeUm": 24.0,
+            "clusterColors": neighborhood_colors,
+            "displayClusters": list(reversed(neighborhood_labels)),
+        }
+        neighborhood_state = json.loads(workflow_state_path.read_text(encoding="utf-8"))
+        if neighborhood_state.get("analysisParameters") != {
+            "neighborhood": expected_neighborhood_parameters,
+        }:
+            raise AssertionError(
+                "Neighborhood settings were not persisted exactly: "
+                f"{neighborhood_state.get('analysisParameters')}"
+            )
 
+        region_payload = {
+            "selectedTypes": [resolved_types[0], resolved_types[0]],
+            "closeUm": 9.0,
+            "dilateUm": 6.0,
+            "minAreaUm2": 0.0,
+            "minCells": 1,
+        }
         region = engine.request(
             "region",
-            {"selectedTypes": [resolved_types[0]], "closeUm": 9.0, "dilateUm": 6.0, "minAreaUm2": 0.0, "minCells": 1},
+            region_payload,
         )
         assert_default_compute_usage(region, "region")
         if not region["boundaries"]:
             raise AssertionError("Region analysis did not produce a boundary.")
+        expected_region_parameters = {
+            **region_payload,
+            "selectedTypes": [resolved_types[0]],
+            "contourDownsample": 2,
+            "lineWidth": 2.0,
+            "lineStyle": "--",
+            "boundaryColor": "#A1D99B",
+            "useTypeColors": False,
+        }
+        region_state = json.loads(workflow_state_path.read_text(encoding="utf-8"))
+        if region_state.get("analysisParameters") != {
+            "neighborhood": expected_neighborhood_parameters,
+            "region": expected_region_parameters,
+        }:
+            raise AssertionError(
+                "Region settings did not preserve neighborhood settings: "
+                f"{region_state.get('analysisParameters')}"
+            )
 
+        distribution_payload = {
+            "boundaryLabel": region["boundaries"][0]["label"],
+            "bandWidthUm": 10.0,
+            "overlayChannels": ["DAPI", "DAPI"],
+            "selectedCellTypes": [*resolved_types, resolved_types[0]],
+        }
         distribution = engine.request(
             "cell_distribution",
-            {"boundaryLabel": region["boundaries"][0]["label"], "bandWidthUm": 10.0, "selectedCellTypes": resolved_types},
+            distribution_payload,
         )
         assert_default_compute_usage(distribution, "cell_distribution")
         if not distribution["artifacts"]:
             raise AssertionError("Cell distribution did not produce artifacts.")
+        expected_distribution_parameters = {
+            **distribution_payload,
+            "overlayChannels": ["DAPI"],
+            "selectedCellTypes": resolved_types,
+        }
+        distribution_state = json.loads(workflow_state_path.read_text(encoding="utf-8"))
+        if distribution_state.get("analysisParameters") != {
+            "neighborhood": expected_neighborhood_parameters,
+            "region": expected_region_parameters,
+            "distribution": expected_distribution_parameters,
+        }:
+            raise AssertionError(
+                "Distribution settings did not preserve upstream settings: "
+                f"{distribution_state.get('analysisParameters')}"
+            )
 
+        nearest_distance_payload = {
+            "mode": "nearest",
+            "targetType": resolved_types[0],
+            "queryTypes": [*resolved_types[1:], resolved_types[1]],
+        }
         distance = engine.request(
             "distance",
-            {"mode": "nearest", "targetType": resolved_types[0], "queryTypes": resolved_types[1:]},
+            nearest_distance_payload,
         )
         assert_default_compute_usage(distance, "distance")
         if not distance["artifacts"]:
             raise AssertionError("Distance analysis did not produce artifacts.")
 
+        nearest_state = json.loads(workflow_state_path.read_text(encoding="utf-8"))
+        expected_analysis_parameters = {
+            "neighborhood": expected_neighborhood_parameters,
+            "region": expected_region_parameters,
+            "distribution": expected_distribution_parameters,
+            "distance": {
+                "nearest": {
+                    **nearest_distance_payload,
+                    "queryTypes": resolved_types[1:],
+                },
+                "lastMode": "nearest",
+            },
+        }
+        if nearest_state.get("analysisParameters") != expected_analysis_parameters:
+            raise AssertionError(
+                "Nearest-distance settings were not persisted exactly: "
+                f"{nearest_state.get('analysisParameters')}"
+            )
+
+        boundary_distance_payload = {
+            "mode": "boundary",
+            "targetType": resolved_types[0],
+            "queryTypes": [*resolved_types[1:], resolved_types[1]],
+            "boundaryLabel": region["boundaries"][0]["label"],
+            "regionFilter": "all",
+        }
+        boundary_distance = engine.request("distance", boundary_distance_payload)
+        assert_default_compute_usage(boundary_distance, "distance boundary")
+        if not boundary_distance["artifacts"]:
+            raise AssertionError("Boundary-distance analysis did not produce artifacts.")
+        expected_analysis_parameters["distance"] = {
+            "nearest": {
+                **nearest_distance_payload,
+                "queryTypes": resolved_types[1:],
+            },
+            "boundary": {
+                **boundary_distance_payload,
+                "queryTypes": resolved_types[1:],
+            },
+            "lastMode": "boundary",
+        }
+        completed_state = json.loads(workflow_state_path.read_text(encoding="utf-8"))
+        if completed_state.get("analysisParameters") != expected_analysis_parameters:
+            raise AssertionError(
+                "Boundary-distance settings did not preserve the nearest-distance settings: "
+                f"{completed_state.get('analysisParameters')}"
+            )
+
         outputs = engine.request("outputs", {})
         if len(outputs["files"]) < 12:
             raise AssertionError("Native output manifest is unexpectedly small.")
+
+        state_before_invalid_requests = json.loads(workflow_state_path.read_text(encoding="utf-8"))
+        invalid_requests = (
+            ("distance", {"mode": "invalid", "targetType": resolved_types[0], "queryTypes": resolved_types[1:]}),
+            (
+                "distance",
+                {
+                    "mode": "boundary",
+                    "targetType": resolved_types[0],
+                    "queryTypes": resolved_types[1:],
+                    "boundaryLabel": "Unavailable boundary",
+                },
+            ),
+            (
+                "cell_distribution",
+                {
+                    "boundaryLabel": "Unavailable boundary",
+                    "bandWidthUm": 10.0,
+                    "selectedCellTypes": resolved_types,
+                },
+            ),
+            (
+                "region",
+                {
+                    **region_payload,
+                    "minCells": 0,
+                },
+            ),
+        )
+        for command, invalid_payload in invalid_requests:
+            try:
+                engine.request(command, invalid_payload)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError(f"{command} accepted an invalid analysis payload: {invalid_payload}")
+            state_after_invalid_request = json.loads(workflow_state_path.read_text(encoding="utf-8"))
+            if state_after_invalid_request != state_before_invalid_requests:
+                raise AssertionError(
+                    f"Rejected {command} payload mutated persisted workflow state: {invalid_payload}"
+                )
 
         if engine.max_protocol_line_bytes >= 2_000_000:
             raise AssertionError(f"Protocol line too large: {engine.max_protocol_line_bytes} bytes")
@@ -291,8 +457,10 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
         if int(assignment_grid["parallel_config"]["parallel_workers"]) != expected_optimizer_workers:
             raise AssertionError("Assignment optimizer did not default to the all-core worker budget.")
 
-        workflow_state_path = output_folder / "00_config" / "windows_session_state.json"
-        workflow_before_screening = json.loads(workflow_state_path.read_text(encoding="utf-8"))["stages"]
+        state_before_screening = json.loads(workflow_state_path.read_text(encoding="utf-8"))
+        workflow_before_screening = state_before_screening["stages"]
+        if state_before_screening.get("analysisParameters") != expected_analysis_parameters:
+            raise AssertionError("Completed analysis settings changed before parameter screening.")
         engine.request(
             "nuclei_optimizer",
             {
@@ -312,12 +480,15 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
                 "useFixedRoiSubset": True,
             },
         )
-        workflow_after_screening = json.loads(workflow_state_path.read_text(encoding="utf-8"))["stages"]
+        state_after_screening = json.loads(workflow_state_path.read_text(encoding="utf-8"))
+        workflow_after_screening = state_after_screening["stages"]
         if workflow_after_screening != workflow_before_screening or not all(workflow_after_screening.values()):
             raise AssertionError(
                 "Parameter screening changed completed workflow history before explicit Apply: "
                 f"before={workflow_before_screening}, after={workflow_after_screening}"
             )
+        if state_after_screening.get("analysisParameters") != expected_analysis_parameters:
+            raise AssertionError("Parameter screening changed persisted downstream analysis settings.")
 
         for required in (
             output_folder / "02_nuclei_segmentation" / "nuclei_native_optimizer_recommendation.json",
@@ -338,11 +509,16 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
                 raise AssertionError(f"Restored workflow is incomplete: {restored['workflow']}")
             if not restored.get("nucleiRecommendation") or not restored.get("assignmentRecommendation"):
                 raise AssertionError("Optimizer recommendations were not restored.")
+            if restored.get("analysisParameters") != expected_analysis_parameters:
+                raise AssertionError(
+                    "Downstream analysis settings were not restored exactly: "
+                    f"{restored.get('analysisParameters')}"
+                )
             if len(restored.get("files", [])) < 12:
                 raise AssertionError("Restored output manifest is unexpectedly small.")
             restored_distance = restored_engine.request(
                 "distance",
-                {"mode": "nearest", "targetType": resolved_types[0], "queryTypes": resolved_types[1:]},
+                boundary_distance_payload,
             )
             if not restored_distance.get("artifacts"):
                 raise AssertionError("A downstream workflow could not run from restored state.")
@@ -354,6 +530,52 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
 
         with tempfile.TemporaryDirectory(prefix="spatialscope-history-guards-") as guard_value:
             guard_root = Path(guard_value)
+
+            legacy_parameters_output = guard_root / "legacy-analysis-parameters"
+            shutil.copytree(output_folder, legacy_parameters_output)
+            legacy_state_path = legacy_parameters_output / "00_config" / "windows_session_state.json"
+            legacy_state = json.loads(legacy_state_path.read_text(encoding="utf-8"))
+            legacy_state.pop("analysisParameters", None)
+            legacy_state_path.write_text(json.dumps(legacy_state, indent=2) + "\n", encoding="utf-8")
+            legacy_engine = EngineProcess(engine_command)
+            try:
+                for attempt in range(2):
+                    legacy_restore = legacy_engine.request(
+                        "restore",
+                        {"outputFolder": str(legacy_parameters_output)},
+                    )
+                    if not all(legacy_restore["workflow"].values()):
+                        raise AssertionError(
+                            f"Legacy analysis-parameter restore {attempt + 1} lost valid workflow history."
+                        )
+                    if legacy_restore.get("analysisParameters"):
+                        raise AssertionError(
+                            "Legacy restore manufactured downstream settings that were never persisted."
+                        )
+            finally:
+                legacy_engine.close()
+
+            invalid_parameters_output = guard_root / "invalid-analysis-parameters"
+            shutil.copytree(output_folder, invalid_parameters_output)
+            invalid_state_path = invalid_parameters_output / "00_config" / "windows_session_state.json"
+            invalid_state = json.loads(invalid_state_path.read_text(encoding="utf-8"))
+            invalid_state["analysisParameters"]["region"]["selectedTypes"] = ["Unavailable cell type"]
+            invalid_state_path.write_text(json.dumps(invalid_state, indent=2) + "\n", encoding="utf-8")
+            invalid_parameters_engine = EngineProcess(engine_command)
+            try:
+                invalid_restore = invalid_parameters_engine.request(
+                    "restore",
+                    {"outputFolder": str(invalid_parameters_output)},
+                )
+                invalid_analysis = invalid_restore.get("analysisParameters", {})
+                if "region" in invalid_analysis:
+                    raise AssertionError("Restore accepted unavailable region cell types from session state.")
+                if invalid_analysis.get("neighborhood") != expected_neighborhood_parameters:
+                    raise AssertionError("One invalid analysis entry discarded an unrelated valid entry.")
+                if not any("region analysis parameters were ignored" in str(value) for value in invalid_restore.get("warnings", [])):
+                    raise AssertionError("Restore did not report the rejected region analysis settings.")
+            finally:
+                invalid_parameters_engine.close()
 
             changed_definition_output = guard_root / "changed-definition"
             shutil.copytree(output_folder, changed_definition_output)
@@ -393,6 +615,8 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
                     )
                 if not changed_state.get("recommendations", {}).get("assignment"):
                     raise AssertionError("Changed-definition recommendation was not persisted.")
+                if changed_state.get("analysisParameters"):
+                    raise AssertionError("Changed cell type definitions retained downstream analysis settings.")
                 try:
                     changed_engine.request("neighborhood", {"gridSizeUm": 24.0})
                 except RuntimeError as error:
@@ -423,6 +647,8 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
                     raise AssertionError("Changed-definition restore exposed stale assignment-derived results.")
                 if changed_restored.get("assignmentParameters"):
                     raise AssertionError("Changed-definition restore exposed stale final assignment parameters.")
+                if changed_restored.get("analysisParameters"):
+                    raise AssertionError("Changed-definition restore exposed stale downstream analysis settings.")
                 stale_preview_keys = {"cellTypes", "neighborhood", "region", "distribution", "distance_nearest", "distance_boundary"}
                 if stale_preview_keys.intersection(changed_restored.get("previewPaths", {})):
                     raise AssertionError("Changed-definition restore exposed stale final previews.")
@@ -462,6 +688,11 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
                     for stage in applied_nuclei["workflow"]
                 ):
                     raise AssertionError(f"Applying nuclei parameters did not invalidate downstream stages: {applied_nuclei['workflow']}")
+                nuclei_applied_state = json.loads(
+                    (nuclei_apply_output / "00_config" / "windows_session_state.json").read_text(encoding="utf-8")
+                )
+                if nuclei_applied_state.get("analysisParameters"):
+                    raise AssertionError("Applied nuclei parameters retained downstream analysis settings.")
                 try:
                     nuclei_apply_engine.request("outputs", {})
                 except RuntimeError as error:
@@ -512,6 +743,11 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
                         "Applying assignment parameters did not invalidate downstream stages: "
                         f"{applied_assignment['workflow']}"
                     )
+                assignment_applied_state = json.loads(
+                    (assignment_apply_output / "00_config" / "windows_session_state.json").read_text(encoding="utf-8")
+                )
+                if assignment_applied_state.get("analysisParameters"):
+                    raise AssertionError("Applied assignment parameters retained downstream analysis settings.")
             finally:
                 assignment_apply_engine.close()
 
@@ -588,6 +824,7 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
                     "assignmentParameters",
                     "nucleiRecommendation",
                     "assignmentRecommendation",
+                    "analysisParameters",
                     "cellTypes",
                     "resolvedCellTypes",
                     "boundaries",
@@ -616,7 +853,7 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
             "resolved_cell_types": resolved_types,
             "neighborhood_clusters": neighborhood["summary"]["clusterCount"],
             "optimizer_checks": 5,
-            "restore_checks": 5,
+            "restore_checks": 9,
             "apply_checks": 2,
             "output_guard_checks": 2,
             "output_files": len(outputs["files"]),
