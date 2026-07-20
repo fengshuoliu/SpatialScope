@@ -10,7 +10,7 @@ SpatialScope is a desktop application for spatial image analysis from aligned, p
 
 [Download the latest SpatialScope for Windows](https://github.com/fengshuoliu/SpatialScope/releases/download/windows-v1.2.1/SpatialScope-Windows-x64-Setup.exe)
 
-SpatialScope 1.2.1 for macOS supports macOS 13 or later on Apple Silicon and Intel Macs. SpatialScope 1.2.1 for Windows supports 64-bit Windows 10 and 11. These independently distributed builds are not notarized by Apple or signed with a commercial Windows certificate, so follow the one-time approval steps in the [installation guide](docs/INSTALLATION.md).
+SpatialScope for macOS supports macOS 13 or later on Apple Silicon and Intel Macs. SpatialScope for Windows supports 64-bit Windows 10 and 11. These independently distributed builds are not notarized by Apple or signed with a commercial Windows certificate, so follow the one-time approval steps in the [installation guide](docs/INSTALLATION.md).
 
 ## Documentation
 
