@@ -83,10 +83,15 @@ Function .onInit
   ${GetOptions} $R0 "/UPDATEPID=" $UpdatePid
   ${IfNot} ${Errors}
     StrCpy $UpdateMode "1"
-    ; Keep the app's named mutex alive while the old process exits. New app
-    ; launches then detect the existing mutex and leave the installation alone.
-    System::Call 'kernel32::OpenMutexW(i 0x00100001, i 0, w "${INSTANCE_MUTEX}") p.R4'
+    ; Atomically open the app's named mutex or create it if the old process
+    ; already exited. Keeping this handle alive prevents a new app launch from
+    ; entering the installation while files are being replaced.
+    System::Call 'kernel32::CreateMutexW(p 0, i 0, w "${INSTANCE_MUTEX}") p.R4'
     StrCpy $InstanceMutexHandle $R4
+    ${If} $InstanceMutexHandle == 0
+      SetErrorLevel 6
+      Quit
+    ${EndIf}
     System::Call 'kernel32::OpenProcess(i 0x00100000, i 0, i $UpdatePid) p.R2'
     ${If} $R2 != 0
       System::Call 'kernel32::WaitForSingleObject(p $R2, i 300000) i.R3'
