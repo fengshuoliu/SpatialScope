@@ -48,7 +48,7 @@ public partial class MainWindow : Window
             ["overlay"] = ["overlay", "split"],
             ["nuclei"] = ["nucleiOptimizer", "nuclei"],
             ["cellTypes"] = ["assignmentOptimizer", "cellTypes"],
-            ["neighborhood"] = ["neighborhood"],
+            ["neighborhood"] = ["neighborhood", "neighborhoodLegend"],
             ["region"] =
             [
                 "region",
@@ -102,6 +102,10 @@ public partial class MainWindow : Window
     private double _yPixels = 1000;
     private double _nucleiOptimizerBudget = 64;
     private double _assignmentOptimizerBudget = 64;
+    private bool _nucleiFixMinimumDiameter = true;
+    private bool _nucleiFixMaximumDiameter = true;
+    private bool _assignmentFixVoronoiRadius;
+    private bool _assignmentFixBufferRadius;
     private double _neighborhoodGridSize = 20;
     private readonly List<string> _regionSelectedCellTypes = [];
     private bool _regionSelectionInitialized;
@@ -146,7 +150,6 @@ public partial class MainWindow : Window
     private string? _nearestDistanceTarget;
     private readonly List<string> _nearestDistanceQueries = [];
     private bool _nearestDistanceQueriesInitialized;
-    private string? _boundaryDistanceTarget;
     private readonly List<string> _boundaryDistanceQueries = [];
     private bool _boundaryDistanceQueriesInitialized;
     private string? _distanceBoundaryLabel;
@@ -682,6 +685,58 @@ public partial class MainWindow : Window
         stack.Children.Add(description);
         return stack;
     }
+
+    private Border CreateOptimizerLockSwitch(
+        string label,
+        string helpText,
+        bool isChecked,
+        string automationId,
+        Action<bool> selectionChanged)
+    {
+        var toggle = new CheckBox
+        {
+            Content = label,
+            IsChecked = isChecked,
+            Style = (Style)FindResource("OptimizerLockSwitchStyle"),
+        };
+        AutomationProperties.SetAutomationId(toggle, automationId);
+        AutomationProperties.SetName(toggle, label);
+        AutomationProperties.SetHelpText(toggle, helpText);
+        toggle.Checked += (_, _) => selectionChanged(true);
+        toggle.Unchecked += (_, _) => selectionChanged(false);
+
+        var stack = new StackPanel();
+        stack.Children.Add(toggle);
+        stack.Children.Add(CreateSupportingText(helpText, new Thickness(0, 7, 0, 0)));
+        return new Border
+        {
+            Background = new SolidColorBrush(Color.FromRgb(244, 248, 249)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(214, 224, 226)),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(7),
+            Padding = new Thickness(12),
+            Margin = new Thickness(0, 0, 10, 0),
+            Child = stack,
+        };
+    }
+
+    private void ClearPendingOptimizerResult(string kind)
+    {
+        var previewKey = kind == "nuclei" ? "nucleiOptimizer" : "assignmentOptimizer";
+        if (kind == "nuclei") _pendingNucleiRecommendation = null;
+        else _pendingAssignmentRecommendation = null;
+        _previewPaths.Remove(previewKey);
+        HideTaggedDetailElement($"preview:{previewKey}");
+        HideTaggedDetailElement($"recommendation:{kind}");
+    }
+
+    private bool IsNucleiParameterFixed(string key) =>
+        (key == "min_diam_um" && _nucleiFixMinimumDiameter)
+        || (key == "max_diam_um" && _nucleiFixMaximumDiameter);
+
+    private bool IsAssignmentParameterFixed(string key) =>
+        (key == "r_voronoi_um" && _assignmentFixVoronoiRadius)
+        || (key == "r_buffer_um" && _assignmentFixBufferRadius);
 
     private UIElement BuildInputsView()
     {
@@ -1264,8 +1319,10 @@ public partial class MainWindow : Window
 
         if (distance.TryGetProperty("boundary", out var boundary) && boundary.ValueKind == JsonValueKind.Object)
         {
-            if (TryGetJsonString(boundary, "targetType", out var targetType))
-                _boundaryDistanceTarget = targetType;
+            // Older Windows sessions serialized a targetType for boundary
+            // distance runs even though that calculation never uses a target.
+            // Deliberately ignore that legacy value while restoring the fields
+            // that still belong to the boundary workflow.
             if (TryGetJsonStringArray(boundary, "queryTypes", out var queryTypes))
             {
                 _boundaryDistanceQueries.Clear();
@@ -1351,7 +1408,6 @@ public partial class MainWindow : Window
         _nearestDistanceTarget = null;
         _nearestDistanceQueries.Clear();
         _nearestDistanceQueriesInitialized = false;
-        _boundaryDistanceTarget = null;
         _boundaryDistanceQueries.Clear();
         _boundaryDistanceQueriesInitialized = false;
         _distanceBoundaryLabel = null;
@@ -1724,6 +1780,36 @@ public partial class MainWindow : Window
         foreach (var parameter in ParameterCatalog.Nuclei) parameterGrid.Children.Add(CreateParameterEditor(parameter, _nucleiValues));
         var optimizerStack = new StackPanel();
         optimizerStack.Children.Add(CreateSupportingText(_localization["NucleiOptimizerHelp"], new Thickness(0, 0, 0, 10)));
+        optimizerStack.Children.Add(CreateSubsectionTitle(
+            _localization["FixedDuringScreening"],
+            new Thickness(0, 4, 0, 6)));
+        optimizerStack.Children.Add(CreateSupportingText(
+            _localization["FixedDuringScreeningHelp"],
+            new Thickness(0, 0, 0, 10)));
+        var nucleiLocks = new UniformGrid { Columns = 2, Margin = new Thickness(0, 0, 0, 14) };
+        nucleiLocks.Children.Add(CreateOptimizerLockSwitch(
+            _localization["MinimumDiameter"],
+            _localization["MinimumDiameterLockHelp"],
+            _nucleiFixMinimumDiameter,
+            "NucleiFixMinimumDiameter",
+            value =>
+            {
+                if (_nucleiFixMinimumDiameter == value) return;
+                _nucleiFixMinimumDiameter = value;
+                ClearPendingOptimizerResult("nuclei");
+            }));
+        nucleiLocks.Children.Add(CreateOptimizerLockSwitch(
+            _localization["MaximumDiameter"],
+            _localization["MaximumDiameterLockHelp"],
+            _nucleiFixMaximumDiameter,
+            "NucleiFixMaximumDiameter",
+            value =>
+            {
+                if (_nucleiFixMaximumDiameter == value) return;
+                _nucleiFixMaximumDiameter = value;
+                ClearPendingOptimizerResult("nuclei");
+            }));
+        optimizerStack.Children.Add(nucleiLocks);
         optimizerStack.Children.Add(CreateNumberField(
             _localization["OptimizerBudget"],
             _nucleiOptimizerBudget,
@@ -1735,6 +1821,11 @@ public partial class MainWindow : Window
             var result = await RunWorkflowAsync("nuclei", "nuclei_optimizer", new
             {
                 parameters = BuildNucleiPayload(),
+                fixedParameterKeys = new[]
+                {
+                    _nucleiFixMinimumDiameter ? "min_diam_um" : null,
+                    _nucleiFixMaximumDiameter ? "max_diam_um" : null,
+                }.Where(key => key is not null).Cast<string>().ToArray(),
                 maxEvaluations = (int)_nucleiOptimizerBudget,
                 parallelWorkers = Math.Max(1, Environment.ProcessorCount),
                 parallelBackend = "threading",
@@ -1749,9 +1840,10 @@ public partial class MainWindow : Window
         optimizerButton.Margin = new Thickness(0, 12, 0, 0);
         SetActionAvailability(optimizerButton, canRun, _localization["CompletePreviousSteps"]);
         optimizerStack.Children.Add(optimizerButton);
+        StackPanel? recommendationPanel = null;
         if (_pendingNucleiRecommendation is JsonElement nucleiRecommendation)
         {
-            var recommendationPanel = new StackPanel { Tag = "recommendation:nuclei" };
+            recommendationPanel = new StackPanel { Tag = "recommendation:nuclei" };
             recommendationPanel.Children.Add(CreateSupportingText(_localization["SuggestedComboReady"], new Thickness(0, 12, 0, 8)));
             var applySuggestion = CreateButton(_localization["ApplySuggestedCombo"], async (_, _) =>
             {
@@ -1768,7 +1860,7 @@ public partial class MainWindow : Window
                 appliedParameters["nucleus_channel"] = _nucleusChannel;
                 foreach (var property in nucleiRecommendation.EnumerateObject())
                 {
-                    if (property.Value.ValueKind == JsonValueKind.Number)
+                    if (property.Value.ValueKind == JsonValueKind.Number && !IsNucleiParameterFixed(property.Name))
                         appliedParameters[property.Name] = property.Value.GetDouble();
                 }
                 if (!await PersistAppliedRecommendationAsync("nuclei", appliedParameters)) return;
@@ -1779,13 +1871,19 @@ public partial class MainWindow : Window
             }, primary: true);
             AutomationProperties.SetAutomationId(applySuggestion, "ApplyNucleiSuggestedCombo");
             recommendationPanel.Children.Add(applySuggestion);
-            optimizerStack.Children.Add(recommendationPanel);
         }
-        if (_previewPaths.TryGetValue("nucleiOptimizer", out var optimizerPreview))
+        if (_pendingNucleiRecommendation is not null
+            || _previewPaths.TryGetValue("nucleiOptimizer", out _))
         {
+            var optimizerPreview = _previewPaths.GetValueOrDefault("nucleiOptimizer");
             var previewPanel = CreateImagePanel(_localization["AdvancedScreening"], optimizerPreview, previewKey: "nucleiOptimizer");
             previewPanel.Margin = new Thickness(0, 16, 0, 0);
             optimizerStack.Children.Add(previewPanel);
+        }
+        if (recommendationPanel is not null)
+        {
+            recommendationPanel.Margin = new Thickness(0, 14, 0, 0);
+            optimizerStack.Children.Add(recommendationPanel);
         }
         var actions = new WrapPanel { Margin = new Thickness(0, 14, 0, 0) };
         var runNuclei = CreateButton(_localization["RunNuclei"], async (_, _) =>
@@ -1927,7 +2025,9 @@ public partial class MainWindow : Window
         if (recommended.ValueKind != JsonValueKind.Object) return;
         foreach (var property in recommended.EnumerateObject())
         {
-            if (_nucleiValues.ContainsKey(property.Name) && property.Value.ValueKind == JsonValueKind.Number)
+            if (_nucleiValues.ContainsKey(property.Name)
+                && property.Value.ValueKind == JsonValueKind.Number
+                && !IsNucleiParameterFixed(property.Name))
                 _nucleiValues[property.Name] = property.Value.GetDouble();
         }
         InvalidateAfter("nuclei");
@@ -2109,6 +2209,36 @@ public partial class MainWindow : Window
 
         var optimizerStack = new StackPanel();
         optimizerStack.Children.Add(CreateSupportingText(_localization["AssignmentOptimizerHelp"], new Thickness(0, 0, 0, 10)));
+        optimizerStack.Children.Add(CreateSubsectionTitle(
+            _localization["FixedDuringScreening"],
+            new Thickness(0, 4, 0, 6)));
+        optimizerStack.Children.Add(CreateSupportingText(
+            _localization["FixedDuringScreeningHelp"],
+            new Thickness(0, 0, 0, 10)));
+        var assignmentLocks = new UniformGrid { Columns = 2, Margin = new Thickness(0, 0, 0, 14) };
+        assignmentLocks.Children.Add(CreateOptimizerLockSwitch(
+            _localization["VoronoiRadius"],
+            _localization["VoronoiRadiusLockHelp"],
+            _assignmentFixVoronoiRadius,
+            "AssignmentFixVoronoiRadius",
+            value =>
+            {
+                if (_assignmentFixVoronoiRadius == value) return;
+                _assignmentFixVoronoiRadius = value;
+                ClearPendingOptimizerResult("assignment");
+            }));
+        assignmentLocks.Children.Add(CreateOptimizerLockSwitch(
+            _localization["BufferRadius"],
+            _localization["BufferRadiusLockHelp"],
+            _assignmentFixBufferRadius,
+            "AssignmentFixBufferRadius",
+            value =>
+            {
+                if (_assignmentFixBufferRadius == value) return;
+                _assignmentFixBufferRadius = value;
+                ClearPendingOptimizerResult("assignment");
+            }));
+        optimizerStack.Children.Add(assignmentLocks);
         optimizerStack.Children.Add(CreateNumberField(
             _localization["OptimizerBudget"],
             _assignmentOptimizerBudget,
@@ -2121,6 +2251,11 @@ public partial class MainWindow : Window
             {
                 cellTypes = BuildCellTypePayload(),
                 parameters = BuildAssignmentPayload(),
+                fixedParameterKeys = new[]
+                {
+                    _assignmentFixVoronoiRadius ? "r_voronoi_um" : null,
+                    _assignmentFixBufferRadius ? "r_buffer_um" : null,
+                }.Where(key => key is not null).Cast<string>().ToArray(),
                 maxEvaluations = (int)_assignmentOptimizerBudget,
                 parallelWorkers = Math.Max(1, Environment.ProcessorCount),
                 parallelBackend = "threading",
@@ -2136,10 +2271,11 @@ public partial class MainWindow : Window
         optimize.Margin = new Thickness(0, 10, 0, 0);
         SetActionAvailability(optimize, canRun && _cellTypes.Count > 0, _localization["CompletePreviousSteps"]);
         optimizerStack.Children.Add(optimize);
+        StackPanel? assignmentRecommendationPanel = null;
         if (_pendingAssignmentRecommendation is JsonElement assignmentRecommendation)
         {
-            var recommendationPanel = new StackPanel { Tag = "recommendation:assignment" };
-            recommendationPanel.Children.Add(CreateSupportingText(_localization["SuggestedComboReady"], new Thickness(0, 12, 0, 8)));
+            assignmentRecommendationPanel = new StackPanel { Tag = "recommendation:assignment" };
+            assignmentRecommendationPanel.Children.Add(CreateSupportingText(_localization["SuggestedComboReady"], new Thickness(0, 12, 0, 8)));
             var applySuggestion = CreateButton(_localization["ApplySuggestedCombo"], async (_, _) =>
             {
                 if (_pendingAssignmentRecommendation is not JsonElement currentRecommendation
@@ -2156,7 +2292,7 @@ public partial class MainWindow : Window
                 appliedParameters["resolve_ambiguous"] = _resolveAmbiguous;
                 foreach (var property in assignmentRecommendation.EnumerateObject())
                 {
-                    if (property.Value.ValueKind == JsonValueKind.Number)
+                    if (property.Value.ValueKind == JsonValueKind.Number && !IsAssignmentParameterFixed(property.Name))
                         appliedParameters[property.Name] = property.Value.GetDouble();
                     else if (property.Name == "thresh_mode" && property.Value.ValueKind == JsonValueKind.String)
                         appliedParameters[property.Name] = property.Value.GetString();
@@ -2170,14 +2306,20 @@ public partial class MainWindow : Window
                 RefreshSectionViewIfSelected("cellTypes");
             }, primary: true);
             AutomationProperties.SetAutomationId(applySuggestion, "ApplyAssignmentSuggestedCombo");
-            recommendationPanel.Children.Add(applySuggestion);
-            optimizerStack.Children.Add(recommendationPanel);
+            assignmentRecommendationPanel.Children.Add(applySuggestion);
         }
-        if (_previewPaths.TryGetValue("assignmentOptimizer", out var assignmentOptimizerPreview))
+        if (_pendingAssignmentRecommendation is not null
+            || _previewPaths.TryGetValue("assignmentOptimizer", out _))
         {
+            var assignmentOptimizerPreview = _previewPaths.GetValueOrDefault("assignmentOptimizer");
             var previewPanel = CreateImagePanel(_localization["AdvancedScreening"], assignmentOptimizerPreview, previewKey: "assignmentOptimizer");
             previewPanel.Margin = new Thickness(0, 14, 0, 0);
             optimizerStack.Children.Add(previewPanel);
+        }
+        if (assignmentRecommendationPanel is not null)
+        {
+            assignmentRecommendationPanel.Margin = new Thickness(0, 14, 0, 0);
+            optimizerStack.Children.Add(assignmentRecommendationPanel);
         }
         var run = CreateButton(_localization["RunAssignment"], async (_, _) =>
         {
@@ -2277,7 +2419,9 @@ public partial class MainWindow : Window
         if (recommended.ValueKind != JsonValueKind.Object) return;
         foreach (var property in recommended.EnumerateObject())
         {
-            if (_assignmentValues.ContainsKey(property.Name) && property.Value.ValueKind == JsonValueKind.Number)
+            if (_assignmentValues.ContainsKey(property.Name)
+                && property.Value.ValueKind == JsonValueKind.Number
+                && !IsAssignmentParameterFixed(property.Name))
                 _assignmentValues[property.Name] = property.Value.GetDouble();
             else if (property.Name == "thresh_mode" && property.Value.ValueKind == JsonValueKind.String)
                 _thresholdMode = property.Value.GetString() ?? "global_otsu";
@@ -2341,6 +2485,7 @@ public partial class MainWindow : Window
             var result = await RunWorkflowAsync("neighborhood", "neighborhood", new { gridSizeUm = _neighborhoodGridSize });
             if (result is null) return;
             _previewPaths["neighborhood"] = result.Value.TryGetProperty("previewPath", out var preview) && preview.ValueKind == JsonValueKind.String ? preview.GetString() ?? string.Empty : string.Empty;
+            _previewPaths["neighborhoodLegend"] = result.Value.TryGetProperty("legendPreviewPath", out var legendPreview) && legendPreview.ValueKind == JsonValueKind.String ? legendPreview.GetString() ?? string.Empty : string.Empty;
             CaptureExportPaths(result.Value);
             RefreshSectionViewIfSelected("neighborhood");
         }, primary: true);
@@ -2350,13 +2495,24 @@ public partial class MainWindow : Window
             workflowReady && hasCellTypes,
             !workflowReady ? _localization["CompletePreviousSteps"] : _localization["PrerequisiteCellTypes"]);
         stack.Children.Add(run);
+        var keyStack = new StackPanel();
+        keyStack.Children.Add(CreateSupportingText(
+            _localization["NeighborhoodClusterKeyHelp"],
+            new Thickness(0, 0, 0, 10)));
+        keyStack.Children.Add(CreateImagePanel(
+            _localization["ColorLegend"],
+            _previewPaths.GetValueOrDefault("neighborhoodLegend"),
+            emptyDetail: _localization["NeighborhoodClusterKeyEmpty"],
+            previewKey: "neighborhoodLegend"));
+
         return CreatePage(
             CreateCard(_localization["AnalysisSettings"], stack),
-            CreateCard(_localization["Preview"], CreateImagePanel(
-                _localization["NeighborhoodTitle"],
+            CreateCard(_localization["NeighborhoodMap"], CreateImagePanel(
+                _localization["FieldPlot"],
                 _previewPaths.GetValueOrDefault("neighborhood"),
                 emptyDetail: hasCellTypes ? _localization["RunAnalysisForPreview"] : _localization["PrerequisiteCellTypes"],
-                previewKey: "neighborhood")));
+                previewKey: "neighborhood")),
+            CreateCard(_localization["NeighborhoodClusterKey"], keyStack));
     }
 
     private UIElement BuildRegionView() => BuildRedesignedRegionView();
@@ -2368,18 +2524,26 @@ public partial class MainWindow : Window
             Margin = new Thickness(24, 22, 24, 24),
             Style = (Style)FindResource("WorkflowTabControlStyle"),
         };
-        tabs.Items.Add(new TabItem
+        var nearestTab = new TabItem
         {
             Header = _localization.EffectiveLanguage == InterfaceLanguage.SimplifiedChinese ? "最近邻距离" : "Nearest-neighbor distances",
             Content = BuildDistancePanel("nearest"),
             Style = (Style)FindResource("WorkflowTabItemStyle"),
-        });
-        tabs.Items.Add(new TabItem
+        };
+        AutomationProperties.SetAutomationId(nearestTab, "DistanceModeNearest");
+        AutomationProperties.SetName(nearestTab, nearestTab.Header.ToString());
+        tabs.Items.Add(nearestTab);
+
+        var boundaryTab = new TabItem
         {
             Header = _localization.EffectiveLanguage == InterfaceLanguage.SimplifiedChinese ? "细胞到边界距离" : "Cell-to-boundary distances",
             Content = BuildDistancePanel("boundary"),
             Style = (Style)FindResource("WorkflowTabItemStyle"),
-        });
+        };
+        AutomationProperties.SetAutomationId(boundaryTab, "DistanceModeBoundary");
+        AutomationProperties.SetName(boundaryTab, boundaryTab.Header.ToString());
+        tabs.Items.Add(boundaryTab);
+
         tabs.SelectedIndex = Math.Clamp(_distanceTabIndex, 0, tabs.Items.Count - 1);
         tabs.SelectionChanged += (_, _) =>
         {
@@ -2390,51 +2554,80 @@ public partial class MainWindow : Window
 
     private UIElement BuildDistancePanel(string mode)
     {
-        var storedTarget = mode == "boundary" ? _boundaryDistanceTarget : _nearestDistanceTarget;
-        if (_resolvedCellTypes.Count > 0
-            && (storedTarget is null || !_resolvedCellTypes.Contains(storedTarget, StringComparer.Ordinal)))
-            storedTarget = _resolvedCellTypes.FirstOrDefault();
-        if (mode == "boundary") _boundaryDistanceTarget = storedTarget;
-        else _nearestDistanceTarget = storedTarget;
-        var storedQueries = mode == "boundary" ? _boundaryDistanceQueries : _nearestDistanceQueries;
-        if (_resolvedCellTypes.Count > 0)
-            storedQueries.RemoveAll(item => !_resolvedCellTypes.Contains(item, StringComparer.Ordinal));
-        var queriesInitialized = mode == "boundary" ? _boundaryDistanceQueriesInitialized : _nearestDistanceQueriesInitialized;
+        var isBoundary = string.Equals(mode, "boundary", StringComparison.Ordinal);
+        string? storedTarget = null;
+        if (!isBoundary)
+        {
+            storedTarget = _nearestDistanceTarget;
+            if (_resolvedCellTypes.Count > 0
+                && (storedTarget is null || !_resolvedCellTypes.Contains(storedTarget, StringComparer.Ordinal)))
+            {
+                storedTarget = _resolvedCellTypes.FirstOrDefault();
+            }
+            _nearestDistanceTarget = storedTarget;
+        }
+
+        var storedQueries = isBoundary ? _boundaryDistanceQueries : _nearestDistanceQueries;
+        var normalizedQueries = storedQueries
+            .Where(item => _resolvedCellTypes.Contains(item, StringComparer.Ordinal))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (!storedQueries.SequenceEqual(normalizedQueries, StringComparer.Ordinal))
+        {
+            storedQueries.Clear();
+            storedQueries.AddRange(normalizedQueries);
+        }
+
+        var queriesInitialized = isBoundary ? _boundaryDistanceQueriesInitialized : _nearestDistanceQueriesInitialized;
         if (!queriesInitialized && _resolvedCellTypes.Count > 0)
         {
             if (storedQueries.Count == 0)
             {
-                var defaultQuery = _resolvedCellTypes.FirstOrDefault(item => !string.Equals(item, storedTarget, StringComparison.Ordinal))
-                    ?? _resolvedCellTypes.FirstOrDefault();
+                var defaultQuery = isBoundary
+                    ? _resolvedCellTypes.FirstOrDefault()
+                    : _resolvedCellTypes.FirstOrDefault(item => !string.Equals(item, storedTarget, StringComparison.Ordinal))
+                      ?? _resolvedCellTypes.FirstOrDefault();
                 if (defaultQuery is not null) storedQueries.Add(defaultQuery);
             }
-            if (mode == "boundary") _boundaryDistanceQueriesInitialized = true;
+            if (isBoundary) _boundaryDistanceQueriesInitialized = true;
             else _nearestDistanceQueriesInitialized = true;
         }
+
         var boundaryOptions = _boundaries.Select(item => item.Label).ToArray();
         if (boundaryOptions.Length > 0
             && (_distanceBoundaryLabel is null || !boundaryOptions.Contains(_distanceBoundaryLabel, StringComparer.Ordinal)))
+        {
             _distanceBoundaryLabel = boundaryOptions.FirstOrDefault();
-        var target = new ComboBox
+        }
+
+        ComboBox? target = null;
+        if (!isBoundary)
         {
-            ItemsSource = _resolvedCellTypes,
-            SelectedItem = storedTarget,
-            Width = 320,
-            HorizontalAlignment = HorizontalAlignment.Left,
-        };
-        AutomationProperties.SetName(target, _localization["TargetCellType"]);
-        var queries = new ListBox { ItemsSource = _resolvedCellTypes, SelectionMode = SelectionMode.Multiple, MinHeight = 110 };
-        AutomationProperties.SetName(queries, _localization["QueryCellTypes"]);
-        AutomationProperties.SetHelpText(queries, _localization["SelectCellTypeHelp"]);
-        foreach (var item in storedQueries) queries.SelectedItems.Add(item);
-        var boundary = new ComboBox
+            target = new ComboBox
+            {
+                ItemsSource = _resolvedCellTypes,
+                SelectedItem = storedTarget,
+                Width = 360,
+                HorizontalAlignment = HorizontalAlignment.Left,
+            };
+            AutomationProperties.SetAutomationId(target, "NearestDistanceTarget");
+            AutomationProperties.SetName(target, _localization["TargetCellType"]);
+        }
+
+        ComboBox? boundary = null;
+        if (isBoundary)
         {
-            ItemsSource = boundaryOptions,
-            SelectedItem = _distanceBoundaryLabel,
-            Width = 320,
-            HorizontalAlignment = HorizontalAlignment.Left,
-        };
-        AutomationProperties.SetName(boundary, _localization["Boundary"]);
+            boundary = new ComboBox
+            {
+                ItemsSource = boundaryOptions,
+                SelectedItem = _distanceBoundaryLabel,
+                Width = 420,
+                HorizontalAlignment = HorizontalAlignment.Left,
+            };
+            AutomationProperties.SetAutomationId(boundary, "BoundaryDistanceBoundary");
+            AutomationProperties.SetName(boundary, _localization["Boundary"]);
+        }
+
         var stack = new StackPanel { Margin = new Thickness(0, 18, 0, 0) };
         var hasCellTypes = _resolvedCellTypes.Count > 0;
         var hasBoundaries = boundaryOptions.Length > 0;
@@ -2443,72 +2636,89 @@ public partial class MainWindow : Window
         else
         {
             if (!hasCellTypes) stack.Children.Add(CreateInlineNotice(_localization["PrerequisiteCellTypes"], warning: true));
-            if (mode == "boundary" && !hasBoundaries) stack.Children.Add(CreateInlineNotice(_localization["PrerequisiteRegion"], warning: true));
+            if (isBoundary && !hasBoundaries) stack.Children.Add(CreateInlineNotice(_localization["PrerequisiteRegion"], warning: true));
         }
-        stack.Children.Add(CreateFieldLabel(_localization["TargetCellType"], new Thickness(0, 0, 0, 6)));
-        stack.Children.Add(target);
-        stack.Children.Add(CreateFieldLabel(_localization["QueryCellTypes"], new Thickness(0, 16, 0, 6)));
-        stack.Children.Add(queries);
-        if (mode == "boundary")
+
+        if (isBoundary)
         {
-            stack.Children.Add(CreateFieldLabel(_localization["Boundary"], new Thickness(0, 16, 0, 6)));
-            stack.Children.Add(boundary);
+            stack.Children.Add(CreateFieldLabel(_localization["Boundary"], new Thickness(0, 0, 0, 6)));
+            stack.Children.Add(boundary!);
         }
-        var runLabel = mode == "boundary" ? _localization["RunBoundaryDistance"] : _localization["RunNearestDistance"];
-        var run = CreateButton(runLabel, async (_, _) =>
+        else
         {
-            var result = await RunWorkflowAsync("distance", "distance", new
-            {
-                mode,
-                targetType = mode == "boundary" ? _boundaryDistanceTarget : _nearestDistanceTarget,
-                queryTypes = storedQueries.ToArray(),
-                boundaryLabel = mode == "boundary" ? _distanceBoundaryLabel : null,
-            });
+            stack.Children.Add(CreateFieldLabel(_localization["TargetCellType"], new Thickness(0, 0, 0, 6)));
+            stack.Children.Add(target!);
+        }
+
+        Button? runButton = null;
+        void RefreshRunAvailability()
+        {
+            if (runButton is null) return;
+            var available = workflowReady
+                && hasCellTypes
+                && (isBoundary || !string.IsNullOrWhiteSpace(_nearestDistanceTarget))
+                && storedQueries.Count > 0
+                && (!isBoundary || (hasBoundaries && !string.IsNullOrWhiteSpace(_distanceBoundaryLabel)));
+            SetActionAvailability(
+                runButton,
+                available,
+                !workflowReady
+                    ? _localization["CompletePreviousSteps"]
+                    : isBoundary && !hasBoundaries ? _localization["PrerequisiteRegion"] : _localization["SelectCellTypeHelp"]);
+        }
+
+        var querySelection = CreateDistanceQuerySelectionGroup(mode, storedQueries, () =>
+        {
+            if (isBoundary) _boundaryDistanceQueriesInitialized = true;
+            else _nearestDistanceQueriesInitialized = true;
+            InvalidateAfter("distance");
+            RefreshRunAvailability();
+        });
+        querySelection.Margin = new Thickness(0, 16, 0, 0);
+        stack.Children.Add(querySelection);
+
+        var runLabel = isBoundary ? _localization["RunBoundaryDistance"] : _localization["RunNearestDistance"];
+        runButton = CreateButton(runLabel, async (_, _) =>
+        {
+            object payload = isBoundary
+                ? new
+                {
+                    mode,
+                    queryTypes = storedQueries.ToArray(),
+                    boundaryLabel = _distanceBoundaryLabel,
+                }
+                : new
+                {
+                    mode,
+                    targetType = _nearestDistanceTarget,
+                    queryTypes = storedQueries.ToArray(),
+                };
+            var result = await RunWorkflowAsync("distance", "distance", payload);
             if (result is null) return;
             _previewPaths[$"distance_{mode}"] = result.Value.TryGetProperty("previewPath", out var preview) && preview.ValueKind == JsonValueKind.String ? preview.GetString() ?? string.Empty : string.Empty;
             CaptureExportPaths(result.Value);
             RefreshSectionViewIfSelected("distance");
         }, primary: true);
-        run.Margin = new Thickness(0, 16, 0, 0);
-        void RefreshRunAvailability()
-        {
-            var available = workflowReady
-                && hasCellTypes
-                && !string.IsNullOrWhiteSpace(mode == "boundary" ? _boundaryDistanceTarget : _nearestDistanceTarget)
-                && storedQueries.Count > 0
-                && (mode != "boundary" || (hasBoundaries && !string.IsNullOrWhiteSpace(_distanceBoundaryLabel)));
-            SetActionAvailability(
-                run,
-                available,
-                !workflowReady
-                    ? _localization["CompletePreviousSteps"]
-                    : mode == "boundary" && !hasBoundaries ? _localization["PrerequisiteRegion"] : _localization["SelectCellTypeHelp"]);
-        }
+        runButton.Margin = new Thickness(0, 16, 0, 0);
+        AutomationProperties.SetAutomationId(runButton, isBoundary ? "RunBoundaryDistance" : "RunNearestDistance");
+        AutomationProperties.SetName(runButton, runLabel);
         RefreshRunAvailability();
-        target.SelectionChanged += (_, _) =>
+
+        if (!isBoundary)
         {
-            var selected = target.SelectedItem?.ToString();
-            var current = mode == "boundary" ? _boundaryDistanceTarget : _nearestDistanceTarget;
-            if (string.Equals(selected, current, StringComparison.Ordinal)) return;
-            if (mode == "boundary") _boundaryDistanceTarget = selected;
-            else _nearestDistanceTarget = selected;
-            InvalidateAfter("distance");
-            RefreshRunAvailability();
-        };
-        queries.SelectionChanged += (_, _) =>
+            target!.SelectionChanged += (_, _) =>
+            {
+                var selected = target.SelectedItem?.ToString();
+                if (string.Equals(selected, _nearestDistanceTarget, StringComparison.Ordinal)) return;
+                _nearestDistanceTarget = selected;
+                InvalidateAfter("distance");
+                RefreshRunAvailability();
+            };
+        }
+
+        if (isBoundary)
         {
-            var selected = queries.SelectedItems.Cast<string>().ToArray();
-            if (storedQueries.SequenceEqual(selected, StringComparer.Ordinal)) return;
-            if (mode == "boundary") _boundaryDistanceQueriesInitialized = true;
-            else _nearestDistanceQueriesInitialized = true;
-            storedQueries.Clear();
-            storedQueries.AddRange(selected);
-            InvalidateAfter("distance");
-            RefreshRunAvailability();
-        };
-        if (mode == "boundary")
-        {
-            boundary.SelectionChanged += (_, _) =>
+            boundary!.SelectionChanged += (_, _) =>
             {
                 var selected = boundary.SelectedItem?.ToString();
                 if (string.Equals(selected, _distanceBoundaryLabel, StringComparison.Ordinal)) return;
@@ -2517,19 +2727,124 @@ public partial class MainWindow : Window
                 RefreshRunAvailability();
             };
         }
-        stack.Children.Add(run);
+
+        stack.Children.Add(runButton);
         var content = new StackPanel();
         content.Children.Add(CreateCard(
-            mode == "boundary" ? _localization["BoundaryDistanceSettings"] : _localization["NearestDistanceSettings"],
+            isBoundary ? _localization["BoundaryDistanceSettings"] : _localization["NearestDistanceSettings"],
             stack));
         content.Children.Add(CreateCard(_localization["Preview"], CreateImagePanel(
             runLabel,
             _previewPaths.GetValueOrDefault($"distance_{mode}"),
-            emptyDetail: mode == "boundary" && !hasBoundaries
+            emptyDetail: isBoundary && !hasBoundaries
                 ? _localization["PrerequisiteRegion"]
                 : hasCellTypes ? _localization["RunAnalysisForPreview"] : _localization["PrerequisiteCellTypes"],
             previewKey: $"distance_{mode}")));
-        return new ScrollViewer { Content = content, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        return new ScrollViewer
+        {
+            Content = content,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+        };
+    }
+
+    private FrameworkElement CreateDistanceQuerySelectionGroup(
+        string mode,
+        List<string> selection,
+        Action onChanged)
+    {
+        var isBoundary = string.Equals(mode, "boundary", StringComparison.Ordinal);
+        var queriesAutomationId = isBoundary ? "BoundaryDistanceQueries" : "NearestDistanceQueries";
+        var available = _resolvedCellTypes.Distinct(StringComparer.Ordinal).ToArray();
+        var host = new StackPanel();
+        var heading = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 0, 0, 8) };
+        var choicesPanelFactory = new FrameworkElementFactory(typeof(WrapPanel));
+        var choices = new ItemsControl
+        {
+            ItemsPanel = new ItemsPanelTemplate(choicesPanelFactory),
+        };
+        AutomationProperties.SetAutomationId(choices, queriesAutomationId);
+        AutomationProperties.SetName(choices, _localization["QueryCellTypes"]);
+        AutomationProperties.SetHelpText(choices, _localization["SelectCellTypeHelp"]);
+        var count = CreateSupportingText($"{selection.Count} / {available.Length}");
+        count.Margin = new Thickness(10, 0, 0, 0);
+        count.VerticalAlignment = VerticalAlignment.Center;
+        AutomationProperties.SetLiveSetting(count, AutomationLiveSetting.Polite);
+        DockPanel.SetDock(count, Dock.Right);
+        heading.Children.Add(count);
+
+        var selectAll = CreateButton(_localization["SelectAll"], (_, _) =>
+        {
+            if (selection.ToHashSet(StringComparer.Ordinal).SetEquals(available)) return;
+            selection.Clear();
+            selection.AddRange(available);
+            foreach (var checkBox in choices.Items.OfType<CheckBox>()) checkBox.IsChecked = true;
+            count.Text = $"{selection.Count} / {available.Length}";
+            onChanged();
+        });
+        selectAll.Padding = new Thickness(10, 4, 10, 4);
+        selectAll.Margin = new Thickness(12, 0, 0, 0);
+        AutomationProperties.SetAutomationId(selectAll, $"{queriesAutomationId}SelectAll");
+        AutomationProperties.SetName(selectAll, _localization["SelectAll"]);
+        DockPanel.SetDock(selectAll, Dock.Right);
+        heading.Children.Add(selectAll);
+        heading.Children.Add(CreateSubsectionTitle(_localization["QueryCellTypes"]));
+        host.Children.Add(heading);
+
+        for (var index = 0; index < available.Length; index++)
+        {
+            var cellType = available[index];
+            var checkBox = new CheckBox
+            {
+                Content = cellType,
+                DataContext = cellType,
+                IsChecked = selection.Contains(cellType, StringComparer.Ordinal),
+                Margin = new Thickness(0, 0, 16, 8),
+                MinWidth = 170,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            AutomationProperties.SetAutomationId(checkBox, $"{queriesAutomationId}Option{index:D2}");
+            AutomationProperties.SetName(checkBox, cellType);
+            AutomationProperties.SetHelpText(checkBox, _localization["SelectCellTypeHelp"]);
+            checkBox.Click += (_, _) =>
+            {
+                var changed = false;
+                if (checkBox.IsChecked == true)
+                {
+                    if (!selection.Contains(cellType, StringComparer.Ordinal))
+                    {
+                        selection.Add(cellType);
+                        changed = true;
+                    }
+                }
+                else if (selection.Count <= 1 && selection.Contains(cellType, StringComparer.Ordinal))
+                {
+                    checkBox.IsChecked = true;
+                    return;
+                }
+                else
+                {
+                    changed = selection.RemoveAll(value => string.Equals(value, cellType, StringComparison.Ordinal)) > 0;
+                }
+
+                if (!changed) return;
+                count.Text = $"{selection.Count} / {available.Length}";
+                onChanged();
+            };
+            choices.Items.Add(checkBox);
+        }
+
+        var choicesFrame = new Border
+        {
+            Background = new SolidColorBrush(Color.FromRgb(247, 249, 250)),
+            BorderBrush = (Brush)FindResource("PanelBorderBrush"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(14, 12, 14, 4),
+            Child = choices,
+        };
+        host.Children.Add(choicesFrame);
+        return host;
     }
 
     private UIElement BuildOutputsView()

@@ -250,7 +250,45 @@ def _filter_neighborhood_display(
     return filtered_mask, filtered_summary, filtered_tiles, selected_labels
 
 
-def make_neighborhood_figure(
+def _neighborhood_cluster_key_table(
+    cluster_summary: pd.DataFrame,
+    cluster_colors: Dict[str, str] | None = None,
+) -> pd.DataFrame:
+    """Build the durable number-to-cluster mapping used by the map and key."""
+    cluster_colors = cluster_colors or {}
+    columns = [
+        'number',
+        'cluster_id',
+        'cluster_key',
+        'cluster_label',
+        'tile_count',
+        'cell_count',
+        'tile_fraction',
+        'color_hex',
+    ]
+    if cluster_summary is None or len(cluster_summary) == 0:
+        return pd.DataFrame(columns=columns)
+
+    rows: List[Dict[str, Any]] = []
+    for row in cluster_summary.sort_values('cluster_id').itertuples(index=False):
+        label = str(row.cluster_label)
+        color_hex = mcolors.to_hex(str(cluster_colors.get(label, '#cccccc')), keep_alpha=False)
+        rows.append(
+            {
+                'number': int(row.cluster_id),
+                'cluster_id': int(row.cluster_id),
+                'cluster_key': str(row.cluster_key),
+                'cluster_label': label,
+                'tile_count': int(row.n_tiles),
+                'cell_count': int(row.n_cells),
+                'tile_fraction': float(row.tile_fraction),
+                'color_hex': color_hex,
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def make_neighborhood_map_figure(
     cluster_mask: np.ndarray,
     cluster_summary: pd.DataFrame,
     pixel_size_um: tuple[float, float],
@@ -258,6 +296,7 @@ def make_neighborhood_figure(
     title: str = 'Neighborhood clusters',
     display_cluster_labels: Sequence[str] | None = None,
 ) -> plt.Figure:
+    """Render the full neighborhood field without embedding its color key."""
     cluster_colors = cluster_colors or {}
     cluster_summary = cluster_summary.copy()
     fig, ax = plt.subplots(figsize=(10.5, 8.0))
@@ -283,12 +322,9 @@ def make_neighborhood_figure(
         return fig
 
     palette = [(0.0, 0.0, 0.0)]
-    legend_handles = []
-
     for row in cluster_summary_display.itertuples(index=False):
         color_hex = str(cluster_colors.get(str(row.cluster_label), '#cccccc'))
         palette.append(mcolors.to_rgb(color_hex))
-        legend_handles.append(mpatches.Patch(color=color_hex, label=str(row.cluster_label)))
 
     cmap = ListedColormap(palette)
     ax.imshow(cluster_mask_display, cmap=cmap, origin='upper', interpolation='nearest', vmin=0, vmax=len(cluster_summary_display))
@@ -307,24 +343,150 @@ def make_neighborhood_figure(
         bbox=dict(boxstyle='round,pad=0.25', facecolor=(0, 0, 0, 0.28), edgecolor='none'),
     )
 
-    if legend_handles:
-        ncol = 1 if len(legend_handles) <= 8 else 2
-        ax.legend(
-            handles=legend_handles,
-            loc='upper left',
-            bbox_to_anchor=(1.01, 1.0),
-            frameon=True,
-            fontsize=9,
-            ncol=ncol,
-            borderaxespad=0.0,
-            title='Clusters',
-            title_fontsize=10,
-        )
-        fig.subplots_adjust(right=0.76)
-    else:
-        fig.subplots_adjust(right=0.98)
+    fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
 
     return fig
+
+
+def make_neighborhood_cluster_key_figure(
+    cluster_summary: pd.DataFrame,
+    cluster_colors: Dict[str, str] | None = None,
+) -> plt.Figure:
+    """Render a separate, readable color key for neighborhood cluster numbers."""
+    key_table = _neighborhood_cluster_key_table(cluster_summary, cluster_colors)
+    count = int(len(key_table))
+    column_count = 2 if count > 18 else 1
+    row_count = max(1, int(np.ceil(max(1, count) / float(column_count))))
+    figure_height = max(4.2, 1.15 + 0.34 * row_count)
+    figure_width = 13.2 if column_count == 2 else 9.2
+    fig, ax = plt.subplots(figsize=(figure_width, figure_height))
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    axis_off(ax)
+
+    ax.text(
+        0.03,
+        0.95,
+        'Number-to-cluster ID key',
+        ha='left',
+        va='top',
+        fontsize=18,
+        fontweight='semibold',
+        color='#1f2933',
+        transform=ax.transAxes,
+    )
+    ax.text(
+        0.03,
+        0.885,
+        'Cluster numbers and colors used in the neighborhood map',
+        ha='left',
+        va='top',
+        fontsize=10.5,
+        color='#52606d',
+        transform=ax.transAxes,
+    )
+
+    if count == 0:
+        ax.text(
+            0.03,
+            0.76,
+            'No neighborhood clusters to display',
+            ha='left',
+            va='top',
+            fontsize=12,
+            color='#52606d',
+            transform=ax.transAxes,
+        )
+        fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
+        return fig
+
+    top = 0.80
+    bottom = 0.05
+    row_step = (top - bottom) / max(1, row_count)
+    column_width = 1.0 / float(column_count)
+    for index, row in enumerate(key_table.itertuples(index=False)):
+        column = index // row_count
+        row_index = index % row_count
+        x = 0.03 + column * column_width
+        y = top - row_index * row_step
+        if row_index % 2 == 0:
+            ax.add_patch(
+                mpatches.Rectangle(
+                    (x - 0.008, y - row_step * 0.68),
+                    column_width - 0.025,
+                    row_step * 0.90,
+                    transform=ax.transAxes,
+                    facecolor='#f5f7fa',
+                    edgecolor='none',
+                    zorder=0,
+                )
+            )
+        ax.add_patch(
+            mpatches.Rectangle(
+                (x, y - row_step * 0.47),
+                0.016,
+                max(0.012, row_step * 0.42),
+                transform=ax.transAxes,
+                facecolor=str(row.color_hex),
+                edgecolor='#9aa5b1',
+                linewidth=0.6,
+                zorder=2,
+            )
+        )
+        ax.text(
+            x + 0.024,
+            y - row_step * 0.25,
+            str(int(row.number)),
+            ha='left',
+            va='center',
+            fontsize=10,
+            fontweight='semibold',
+            family='monospace',
+            color='#1f2933',
+            transform=ax.transAxes,
+        )
+        ax.text(
+            x + 0.078,
+            y - row_step * 0.25,
+            str(row.cluster_label),
+            ha='left',
+            va='center',
+            fontsize=9.5,
+            color='#1f2933',
+            transform=ax.transAxes,
+        )
+        ax.text(
+            x + column_width - 0.042,
+            y - row_step * 0.25,
+            f'{int(row.tile_count)} tiles, {int(row.cell_count)} cells',
+            ha='right',
+            va='center',
+            fontsize=8.5,
+            color='#52606d',
+            transform=ax.transAxes,
+        )
+
+    fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
+    return fig
+
+
+def make_neighborhood_figure(
+    cluster_mask: np.ndarray,
+    cluster_summary: pd.DataFrame,
+    pixel_size_um: tuple[float, float],
+    cluster_colors: Dict[str, str] | None = None,
+    title: str = 'Neighborhood clusters',
+    display_cluster_labels: Sequence[str] | None = None,
+) -> plt.Figure:
+    """Backward-compatible alias for callers that expect the map figure."""
+    return make_neighborhood_map_figure(
+        cluster_mask=cluster_mask,
+        cluster_summary=cluster_summary,
+        pixel_size_um=pixel_size_um,
+        cluster_colors=cluster_colors,
+        title=title,
+        display_cluster_labels=display_cluster_labels,
+    )
 
 
 def save_neighborhood_analysis_outputs(
@@ -343,26 +505,32 @@ def save_neighborhood_analysis_outputs(
         display_cluster_labels=display_cluster_labels,
     )
 
-    figure = make_neighborhood_figure(
+    figure = make_neighborhood_map_figure(
         cluster_mask=cluster_mask,
         cluster_summary=cluster_summary,
         pixel_size_um=pixel_size_um,
         cluster_colors=cluster_colors,
         title=f"Neighborhood clusters ({float(result.get('grid_size_um', 20.0)):.1f} µm grid)",
     )
+    cluster_key = _neighborhood_cluster_key_table(cluster_summary, cluster_colors)
+    cluster_key_figure = make_neighborhood_cluster_key_figure(cluster_summary, cluster_colors)
 
     mask_tiff = save_dir / 'neighborhood_cluster_mask_uint16.tiff'
     summary_csv = save_dir / 'neighborhood_cluster_summary.csv'
     tiles_csv = save_dir / 'neighborhood_tile_assignments.csv'
     params_json = save_dir / 'neighborhood_params.json'
-    svg_path = save_dir / 'neighborhood_clusters.svg'
-    png_path = save_dir / 'neighborhood_clusters.png'
-    tiff_path = save_dir / 'neighborhood_clusters.tiff'
+    map_svg_path = save_dir / 'neighborhood_map.svg'
+    map_png_path = save_dir / 'neighborhood_map.png'
+    map_tiff_path = save_dir / 'neighborhood_map.tiff'
+    key_svg_path = save_dir / 'neighborhood_cluster_key.svg'
+    key_png_path = save_dir / 'neighborhood_cluster_key.png'
+    key_csv_path = save_dir / 'neighborhood_cluster_key.csv'
 
     if save_outputs:
         save_uint16_tiff(mask_tiff, cluster_mask)
         cluster_summary.to_csv(summary_csv, index=False)
         tile_assignments.to_csv(tiles_csv, index=False)
+        cluster_key.to_csv(key_csv_path, index=False)
         write_json(
             params_json,
             {
@@ -376,20 +544,31 @@ def save_neighborhood_analysis_outputs(
                 'cluster_colors': {str(k): str(v) for k, v in cluster_colors.items()},
             },
         )
-        figure.savefig(svg_path, dpi=600, bbox_inches='tight', pad_inches=0)
-        figure.savefig(png_path, dpi=300, bbox_inches='tight', pad_inches=0)
-        figure.savefig(tiff_path, dpi=600, bbox_inches='tight', pad_inches=0)
+        figure.savefig(map_svg_path, dpi=600, bbox_inches='tight', pad_inches=0)
+        figure.savefig(map_png_path, dpi=300, bbox_inches='tight', pad_inches=0)
+        figure.savefig(map_tiff_path, dpi=600, bbox_inches='tight', pad_inches=0)
+        cluster_key_figure.savefig(key_svg_path, dpi=600, bbox_inches='tight', pad_inches=0, facecolor='white')
+        cluster_key_figure.savefig(key_png_path, dpi=300, bbox_inches='tight', pad_inches=0, facecolor='white')
 
     return {
         'figure': figure,
+        'legend_figure': cluster_key_figure,
         'display_cluster_labels': list(selected_labels),
         'saved_paths': {
             'mask_tiff': mask_tiff,
             'summary_csv': summary_csv,
             'tiles_csv': tiles_csv,
             'params_json': params_json,
-            'svg': svg_path,
-            'png': png_path,
-            'tiff': tiff_path,
+            'map_svg': map_svg_path,
+            'map_png': map_png_path,
+            'map_tiff': map_tiff_path,
+            'legend_svg': key_svg_path,
+            'legend_png': key_png_path,
+            'legend_csv': key_csv_path,
+            # Preserve the original save-path keys for Python callers while
+            # pointing them to the new field-only map exports.
+            'svg': map_svg_path,
+            'png': map_png_path,
+            'tiff': map_tiff_path,
         },
     }

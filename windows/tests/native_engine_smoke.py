@@ -211,6 +211,7 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
             "nuclei_optimizer",
             {
                 "parameters": {"nucleus_channel": "DAPI", "min_diam_um": 6.0, "max_diam_um": 16.0},
+                "fixedParameterKeys": ["min_diam_um", "max_diam_um"],
                 "maxEvaluations": 2,
                 "parallelBackend": "threading",
                 "useFixedRoiSubset": True,
@@ -219,6 +220,13 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
         assert_default_compute_usage(nuclei_optimizer, "nuclei_optimizer")
         if not nuclei_optimizer["recommendedParameters"]:
             raise AssertionError("Nuclei optimizer did not return a recommendation.")
+        if nuclei_optimizer.get("fixedParameters") != {"min_diam_um": 6.0, "max_diam_um": 16.0}:
+            raise AssertionError(f"Nuclei optimizer did not preserve its fixed diameters: {nuclei_optimizer}")
+        if any(
+            float(nuclei_optimizer["recommendedParameters"].get(key, -1)) != expected
+            for key, expected in (("min_diam_um", 6.0), ("max_diam_um", 16.0))
+        ):
+            raise AssertionError(f"Nuclei recommendation changed a fixed diameter: {nuclei_optimizer}")
 
         nuclei = engine.request(
             "nuclei",
@@ -248,6 +256,7 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
             {
                 "cellTypes": cell_types(),
                 "parameters": {"r_voronoi_um": 3.0, "r_buffer_um": 2.0, "r_vote_um": 3.0},
+                "fixedParameterKeys": ["r_voronoi_um"],
                 "maxEvaluations": 2,
                 "parallelBackend": "threading",
                 "useFixedRoiSubset": True,
@@ -256,6 +265,10 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
         assert_default_compute_usage(assignment_optimizer, "celltype_optimizer")
         if not assignment_optimizer["recommendedParameters"]:
             raise AssertionError("Assignment optimizer did not return a recommendation.")
+        if assignment_optimizer.get("fixedParameters") != {"r_voronoi_um": 3.0}:
+            raise AssertionError(f"Assignment optimizer did not preserve its fixed radius: {assignment_optimizer}")
+        if float(assignment_optimizer["recommendedParameters"].get("r_voronoi_um", -1)) != 3.0:
+            raise AssertionError(f"Assignment recommendation changed a fixed radius: {assignment_optimizer}")
 
         assignment = engine.request(
             "celltype_assignment",
@@ -299,6 +312,38 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
         }
         neighborhood = engine.request("neighborhood", neighborhood_payload)
         assert_default_compute_usage(neighborhood, "neighborhood")
+        neighborhood_preview_path = Path(str(neighborhood.get("previewPath") or ""))
+        neighborhood_legend_path = Path(str(neighborhood.get("legendPreviewPath") or ""))
+        if neighborhood_preview_path.name != "neighborhood_map.png" or not neighborhood_preview_path.is_file():
+            raise AssertionError(f"Neighborhood response omitted the separate map preview: {neighborhood}")
+        if neighborhood_legend_path.name != "neighborhood_cluster_key.png" or not neighborhood_legend_path.is_file():
+            raise AssertionError(f"Neighborhood response omitted the separate cluster key preview: {neighborhood}")
+        if neighborhood_preview_path == neighborhood_legend_path:
+            raise AssertionError("Neighborhood map and cluster key previews resolved to the same file.")
+        neighborhood_key_path = neighborhood_preview_path.parent / "neighborhood_cluster_key.csv"
+        with neighborhood_key_path.open(newline="", encoding="utf-8") as key_file:
+            neighborhood_key_rows = list(csv.DictReader(key_file))
+        expected_key_columns = [
+            "number",
+            "cluster_id",
+            "cluster_key",
+            "cluster_label",
+            "tile_count",
+            "cell_count",
+            "tile_fraction",
+            "color_hex",
+        ]
+        if not neighborhood_key_rows or list(neighborhood_key_rows[0]) != expected_key_columns:
+            raise AssertionError(f"Neighborhood cluster key has the wrong schema: {neighborhood_key_rows}")
+        if any(int(row["number"]) != int(row["cluster_id"]) for row in neighborhood_key_rows):
+            raise AssertionError("Neighborhood cluster numbers do not map directly to cluster IDs.")
+        if {row["cluster_label"] for row in neighborhood_key_rows} != set(neighborhood_labels):
+            raise AssertionError("Neighborhood cluster key omitted a displayed cluster label.")
+        if any(
+            row["color_hex"].lower() != neighborhood_colors[row["cluster_label"]].lower()
+            for row in neighborhood_key_rows
+        ):
+            raise AssertionError("Neighborhood cluster key colors do not match the requested map colors.")
         expected_neighborhood_parameters = {
             "gridSizeUm": 24.0,
             "clusterColors": neighborhood_colors,
@@ -764,13 +809,14 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
 
         boundary_distance_payload = {
             "mode": "boundary",
-            "targetType": resolved_types[0],
             "queryTypes": [*resolved_types[1:], resolved_types[1]],
             "boundaryLabel": region["boundaries"][0]["label"],
             "regionFilter": "all",
         }
         boundary_distance = engine.request("distance", boundary_distance_payload)
         assert_default_compute_usage(boundary_distance, "distance boundary")
+        if "targetType" in boundary_distance.get("summary", {}):
+            raise AssertionError("Boundary-distance response still exposes an unused targetType.")
         if not boundary_distance["artifacts"]:
             raise AssertionError("Boundary-distance analysis did not produce artifacts.")
         expected_analysis_parameters["distance"] = {
@@ -795,6 +841,32 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
         if len(outputs["files"]) < 12:
             raise AssertionError("Native output manifest is unexpectedly small.")
 
+        visible_paths = [
+            str(item.get("relative_path") or item.get("relativePath") or "")
+            for item in outputs["files"]
+        ]
+        opaque_names = [
+            path
+            for path in visible_paths
+            if re.search(r"(?i)(?:^|[_-])[0-9a-f]{12,16}(?:[_\-.]|$)", Path(path).name)
+        ]
+        if opaque_names:
+            raise AssertionError(f"Results exposed opaque identity hashes: {opaque_names}")
+        if any("previews/" in path.replace("\\", "/") for path in visible_paths):
+            raise AssertionError("Results exposed transient Region preview-cache files.")
+        expected_distance_names = {
+            "nearest_neighbor_distances.csv",
+            "nearest_neighbor_distances.png",
+            "nearest_neighbor_distances.svg",
+            "cell_to_boundary_distances.csv",
+            "cell_to_boundary_distances.png",
+            "cell_to_boundary_distances.svg",
+        }
+        visible_names = {Path(path).name for path in visible_paths}
+        missing_distance_names = sorted(expected_distance_names - visible_names)
+        if missing_distance_names:
+            raise AssertionError(f"Readable distance filenames are missing: {missing_distance_names}")
+
         state_before_invalid_requests = json.loads(workflow_state_path.read_text(encoding="utf-8"))
         invalid_requests = (
             ("distance", {"mode": "invalid", "targetType": resolved_types[0], "queryTypes": resolved_types[1:]}),
@@ -802,7 +874,6 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
                 "distance",
                 {
                     "mode": "boundary",
-                    "targetType": resolved_types[0],
                     "queryTypes": resolved_types[1:],
                     "boundaryLabel": "Unavailable boundary",
                 },
@@ -934,6 +1005,10 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
             raise AssertionError("Nuclei optimizer did not default to the all-core worker budget.")
         if int(assignment_grid["parallel_config"]["parallel_workers"]) != expected_optimizer_workers:
             raise AssertionError("Assignment optimizer did not default to the all-core worker budget.")
+        if any(int(nuclei_grid["search_space"][label]["n_values"]) != 1 for label in ("MIN_DIAM_UM", "MAX_DIAM_UM")):
+            raise AssertionError("Nuclei optimizer grid did not record fixed diameter singleton axes.")
+        if int(assignment_grid["search_space"]["R_VORONOI_UM"]["n_values"]) != 1:
+            raise AssertionError("Assignment optimizer grid did not record the fixed Voronoi radius axis.")
 
         state_before_screening = json.loads(workflow_state_path.read_text(encoding="utf-8"))
         workflow_before_screening = state_before_screening["stages"]
@@ -999,6 +1074,16 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
                 source_height,
             ):
                 raise AssertionError(f"Restore did not expose the source image dimensions: {restored}")
+            restored_neighborhood_previews = restored.get("previewPaths", {})
+            for preview_key, expected_name in (
+                ("neighborhood", "neighborhood_map.png"),
+                ("neighborhoodLegend", "neighborhood_cluster_key.png"),
+            ):
+                restored_preview_path = Path(str(restored_neighborhood_previews.get(preview_key) or ""))
+                if restored_preview_path.name != expected_name or not restored_preview_path.is_file():
+                    raise AssertionError(
+                        f"Restore omitted the new {preview_key} output: {restored_neighborhood_previews}"
+                    )
             for preview_key in ("regionOverlay", "regionMask"):
                 restored_preview_path = Path(str(restored.get("previewPaths", {}).get(preview_key) or ""))
                 if not restored_preview_path.is_file():
@@ -1037,6 +1122,30 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
 
         with tempfile.TemporaryDirectory(prefix="spatialscope-history-guards-") as guard_value:
             guard_root = Path(guard_value)
+
+            legacy_neighborhood_output = guard_root / "legacy-neighborhood-preview"
+            shutil.copytree(output_folder, legacy_neighborhood_output)
+            legacy_neighborhood_dir = legacy_neighborhood_output / "06_neighborhood_analysis"
+            (legacy_neighborhood_dir / "neighborhood_map.png").replace(
+                legacy_neighborhood_dir / "neighborhood_preview.png"
+            )
+            (legacy_neighborhood_dir / "neighborhood_cluster_key.png").unlink()
+            legacy_neighborhood_engine = EngineProcess(engine_command)
+            try:
+                legacy_neighborhood_restore = legacy_neighborhood_engine.request(
+                    "restore",
+                    {"outputFolder": str(legacy_neighborhood_output)},
+                )
+                if not legacy_neighborhood_restore.get("workflow", {}).get("neighborhood"):
+                    raise AssertionError("Restore rejected a valid legacy neighborhood preview.")
+                legacy_previews = legacy_neighborhood_restore.get("previewPaths", {})
+                legacy_preview_path = Path(str(legacy_previews.get("neighborhood") or ""))
+                if legacy_preview_path.name != "neighborhood_preview.png" or not legacy_preview_path.is_file():
+                    raise AssertionError(f"Restore did not fall back to the legacy neighborhood preview: {legacy_previews}")
+                if "neighborhoodLegend" in legacy_previews:
+                    raise AssertionError("Restore exposed a missing legacy neighborhood cluster key.")
+            finally:
+                legacy_neighborhood_engine.close()
 
             zero_region_output = guard_root / "zero-region-run"
             shutil.copytree(output_folder, zero_region_output)
@@ -1253,7 +1362,15 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
                     raise AssertionError("Changed-definition restore exposed stale final assignment parameters.")
                 if changed_restored.get("analysisParameters"):
                     raise AssertionError("Changed-definition restore exposed stale downstream analysis settings.")
-                stale_preview_keys = {"cellTypes", "neighborhood", "region", "distribution", "distance_nearest", "distance_boundary"}
+                stale_preview_keys = {
+                    "cellTypes",
+                    "neighborhood",
+                    "neighborhoodLegend",
+                    "region",
+                    "distribution",
+                    "distance_nearest",
+                    "distance_boundary",
+                }
                 if stale_preview_keys.intersection(changed_restored.get("previewPaths", {})):
                     raise AssertionError("Changed-definition restore exposed stale final previews.")
                 stale_subdirs = {
@@ -1458,7 +1575,7 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
             "neighborhood_clusters": neighborhood["summary"]["clusterCount"],
             "optimizer_checks": 5,
             "region_protocol_checks": 12,
-            "restore_checks": 15,
+            "restore_checks": 16,
             "apply_checks": 2,
             "output_guard_checks": 2,
             "output_files": len(outputs["files"]),

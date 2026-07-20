@@ -93,10 +93,18 @@ try {
     Assert-Success "CPU and OpenCL compute parity tests"
     & $PythonExe -m unittest discover -s $TestsRoot -p "test_nuclei_optimizer_grouping.py" -v
     Assert-Success "exact nuclei optimizer grouping tests"
+    & $PythonExe -m unittest discover -s $TestsRoot -p "test_optimizer_fixed_parameters.py" -v
+    Assert-Success "optimizer fixed-parameter contract tests"
+    & $PythonExe -m unittest discover -s $TestsRoot -p "test_assignment_parameter_parity.py" -v
+    Assert-Success "assignment parameter parity tests"
     & $PythonExe -m unittest discover -s $TestsRoot -p "test_celltype_vectorized_rules.py" -v
     Assert-Success "exact vectorized cell-type rule tests"
+    & $PythonExe -m unittest discover -s $TestsRoot -p "test_neighborhood_outputs.py" -v
+    Assert-Success "separate neighborhood map and cluster-key tests"
     & $PythonExe -m unittest discover -s $TestsRoot -p "test_region_overlay_filtering.py" -v
     Assert-Success "Region overlay filtering tests"
+    & $PythonExe -m unittest discover -s $TestsRoot -p "test_region_output_filenames.py" -v
+    Assert-Success "human-readable Region output filename tests"
     & $PythonExe (Join-Path $TestsRoot "region_registry_rerun_smoke.py")
     Assert-Success "Region registry rerun smoke test"
     & $PythonExe (Join-Path $TestsRoot "distribution_preview_contract_smoke.py")

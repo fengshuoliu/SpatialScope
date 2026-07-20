@@ -840,13 +840,12 @@ public partial class MainWindow
             return string.Format(
                 CultureInfo.CurrentCulture,
                 _localization["RoiBoundaryDisplayTitle"],
-                row.DisplayId,
                 row.Label,
                 row.CellCount);
         }
         catch (FormatException)
         {
-            return $"#{row.DisplayId} {row.Label} · {row.CellCount:N0}";
+            return $"{row.Label} ({row.CellCount:N0} cells)";
         }
     }
 
@@ -1806,15 +1805,15 @@ public partial class MainWindow
         };
         grid.Columns.Add(new DataGridTextColumn
         {
-            Header = _localization["RoiId"],
-            Binding = new Binding(nameof(RegionSummaryRow.DisplayId)),
-            Width = 90,
+            Header = _localization["RoiName"],
+            Binding = new Binding(nameof(RegionSummaryRow.Label)),
+            Width = new DataGridLength(1, DataGridLengthUnitType.Star),
         });
         grid.Columns.Add(new DataGridTextColumn
         {
             Header = _localization["DominantType"],
             Binding = new Binding(nameof(RegionSummaryRow.DominantType)),
-            Width = new DataGridLength(1, DataGridLengthUnitType.Star),
+            Width = new DataGridLength(0.75, DataGridLengthUnitType.Star),
         });
         grid.Columns.Add(new DataGridTextColumn
         {

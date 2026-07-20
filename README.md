@@ -24,7 +24,7 @@ SpatialScope for macOS supports macOS 13 or later on Apple Silicon and Intel Mac
 | Platform | Status | Repository location |
 | --- | --- | --- |
 | macOS | Version 1.2.1 | Current Xcode project |
-| Windows x64 | Version 1.2.3 | [`windows/`](windows/) |
+| Windows x64 | Version 1.2.4 | [`windows/`](windows/) |
 
 Both platforms use the same `SpatialScope` product identity, analysis definitions, and output contracts. Platform versions and release tags are tracked independently.
 
