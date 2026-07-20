@@ -1,6 +1,7 @@
 param(
     [switch]$SkipDependencies,
-    [switch]$FullSmoke
+    [switch]$FullSmoke,
+    [switch]$RequireGpuParity
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,6 +23,10 @@ $DistRoot = Join-Path $NativeRoot "dist"
 $InstallerSmokeRoot = Join-Path $BuildRoot "installer-smoke"
 $PythonExe = Join-Path $WindowsRoot ".venv\Scripts\python.exe"
 $SyntheticInput = Join-Path $WindowsRoot "build\smoke-output\synthetic_input"
+
+if ($RequireGpuParity -and -not $FullSmoke) {
+    throw "-RequireGpuParity must be used together with -FullSmoke."
+}
 
 function Assert-Success([string]$Operation) {
     if ($LASTEXITCODE -ne 0) {
@@ -84,6 +89,8 @@ try {
 
     & $PythonExe -m compileall -q $BackendRoot $TestsRoot
     Assert-Success "native Python compile check"
+    & $PythonExe -m unittest discover -s $TestsRoot -p "test_compute_runtime.py" -v
+    Assert-Success "CPU and OpenCL compute parity tests"
     & $PythonExe (Join-Path $BackendRoot "native_engine.py") --smoke-test
     Assert-Success "source Matplotlib renderer smoke test"
     dotnet build $ProjectPath --configuration Release
@@ -137,11 +144,33 @@ try {
     Assert-Success "staged configure-to-overlay smoke test"
 
     if ($FullSmoke) {
+        $StagedEngine = Join-Path $EngineStage "SpatialScopeEngine.exe"
         & $PythonExe (Join-Path $TestsRoot "native_engine_smoke.py") `
-            --engine-executable (Join-Path $EngineStage "SpatialScopeEngine.exe") `
+            --engine-executable $StagedEngine `
             --input-folder $SyntheticInput `
             --output-folder (Join-Path $BuildRoot "staged-full-smoke")
         Assert-Success "staged full scientific workflow smoke test"
+
+        if ($RequireGpuParity) {
+            $HadGpuMode = Test-Path -LiteralPath Env:SPATIALSCOPE_GPU_MODE
+            $PreviousGpuMode = $env:SPATIALSCOPE_GPU_MODE
+            try {
+                $env:SPATIALSCOPE_GPU_MODE = "require"
+                & $PythonExe (Join-Path $TestsRoot "native_gpu_parity.py") `
+                    --engine-executable $StagedEngine `
+                    --input-folder $SyntheticInput `
+                    --output-root (Join-Path $BuildRoot "staged-gpu-parity")
+                Assert-Success "staged required-GPU scientific parity test"
+            }
+            finally {
+                if ($HadGpuMode) {
+                    $env:SPATIALSCOPE_GPU_MODE = $PreviousGpuMode
+                }
+                else {
+                    Remove-Item -LiteralPath Env:SPATIALSCOPE_GPU_MODE -ErrorAction SilentlyContinue
+                }
+            }
+        }
     }
 
     [xml]$ProjectXml = Get-Content -LiteralPath $ProjectPath -Raw

@@ -118,6 +118,36 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
         compute = hello.get("compute", {})
         if int(compute.get("defaultCpuWorkers", 0)) != expected_cpu_count:
             raise AssertionError(f"Engine did not default to all logical CPUs: {compute}")
+        expected_gpu_names = set(str(value) for value in compute.get("detectedGpus", []))
+
+        def assert_default_compute_usage(result: dict[str, Any], command: str) -> None:
+            usage = result.get("compute", {})
+            if int(usage.get("cpuWorkersConfigured", 0)) != expected_cpu_count:
+                raise AssertionError(f"{command} did not retain the all-CPU default: {usage}")
+            if int(usage.get("cpuWorkersUsed", 0)) != expected_cpu_count:
+                raise AssertionError(f"{command} did not execute returned work on all logical CPU lanes: {usage}")
+            worker_details = usage.get("cpuWorkerDetails", [])
+            if len({int(worker.get("threadId", -1)) for worker in worker_details}) != expected_cpu_count:
+                raise AssertionError(f"{command} did not confirm distinct CPU worker threads: {usage}")
+            if any(
+                int(worker.get("workUnits", 0)) <= 0 or int(worker.get("elements", 0)) <= 0
+                for worker in worker_details
+            ):
+                raise AssertionError(f"{command} reported a CPU lane without completed output work: {usage}")
+            if not expected_gpu_names:
+                return
+            used_gpu_names = {
+                str(device.get("name"))
+                for device in usage.get("gpuDevicesUsed", [])
+                if int(device.get("outputElements", 0)) > 0
+            }
+            if used_gpu_names != expected_gpu_names:
+                raise AssertionError(
+                    f"{command} did not return output from every compatible GPU; "
+                    f"expected={sorted(expected_gpu_names)}, used={sorted(used_gpu_names)}, usage={usage}"
+                )
+            if int(usage.get("gpuOutputElements", 0)) <= 0:
+                raise AssertionError(f"{command} reported GPUs without using their output: {usage}")
 
         configure = engine.request(
             "configure",
@@ -134,6 +164,7 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
             raise AssertionError("Native configuration did not discover all five channels.")
 
         overlay = engine.request("overlay", {"clipHighPercentile": 99.8})
+        assert_default_compute_usage(overlay, "overlay")
         for preview_path in overlay["previewPaths"].values():
             if not Path(preview_path).is_file():
                 raise AssertionError(f"Missing overlay preview: {preview_path}")
@@ -147,6 +178,7 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
                 "useFixedRoiSubset": True,
             },
         )
+        assert_default_compute_usage(nuclei_optimizer, "nuclei_optimizer")
         if not nuclei_optimizer["recommendedParameters"]:
             raise AssertionError("Nuclei optimizer did not return a recommendation.")
 
@@ -168,6 +200,7 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
                 },
             },
         )
+        assert_default_compute_usage(nuclei, "nuclei")
         n_nuclei = int(nuclei["summary"]["nNuclei"])
         if not 40 <= n_nuclei <= 100:
             raise AssertionError(f"Unexpected native-engine nuclei count: {n_nuclei}")
@@ -182,6 +215,7 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
                 "useFixedRoiSubset": True,
             },
         )
+        assert_default_compute_usage(assignment_optimizer, "celltype_optimizer")
         if not assignment_optimizer["recommendedParameters"]:
             raise AssertionError("Assignment optimizer did not return a recommendation.")
 
@@ -205,11 +239,13 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
                 },
             },
         )
+        assert_default_compute_usage(assignment, "celltype_assignment")
         resolved_types = [name for name in assignment["summary"]["cellCounts"] if name not in {"Unassigned", "Ambiguous"}]
         if len(resolved_types) < 3:
             raise AssertionError(f"Expected at least three assigned types, got {resolved_types}")
 
         neighborhood = engine.request("neighborhood", {"gridSizeUm": 24.0})
+        assert_default_compute_usage(neighborhood, "neighborhood")
         if int(neighborhood["summary"]["clusterCount"]) < 1:
             raise AssertionError("Neighborhood analysis did not produce clusters.")
 
@@ -217,6 +253,7 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
             "region",
             {"selectedTypes": [resolved_types[0]], "closeUm": 9.0, "dilateUm": 6.0, "minAreaUm2": 0.0, "minCells": 1},
         )
+        assert_default_compute_usage(region, "region")
         if not region["boundaries"]:
             raise AssertionError("Region analysis did not produce a boundary.")
 
@@ -224,6 +261,7 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
             "cell_distribution",
             {"boundaryLabel": region["boundaries"][0]["label"], "bandWidthUm": 10.0, "selectedCellTypes": resolved_types},
         )
+        assert_default_compute_usage(distribution, "cell_distribution")
         if not distribution["artifacts"]:
             raise AssertionError("Cell distribution did not produce artifacts.")
 
@@ -231,6 +269,7 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
             "distance",
             {"mode": "nearest", "targetType": resolved_types[0], "queryTypes": resolved_types[1:]},
         )
+        assert_default_compute_usage(distance, "distance")
         if not distance["artifacts"]:
             raise AssertionError("Distance analysis did not produce artifacts.")
 

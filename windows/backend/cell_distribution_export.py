@@ -27,6 +27,7 @@ RUNTIME_SUPPORT_DIR = Path(__file__).resolve().parent / "runtime_support"
 if RUNTIME_SUPPORT_DIR.exists() and str(RUNTIME_SUPPORT_DIR) not in sys.path:
     sys.path.insert(0, str(RUNTIME_SUPPORT_DIR))
 
+from src.spatialscope_analysis.compute_runtime import get_compute_runtime  # noqa: E402
 from src.spatialscope_analysis.io import files_to_long_df, load_any_tiff, safe_name, valid_pixel_size, write_json  # noqa: E402
 from src.spatialscope_analysis.visualization import overlay_multi_channels  # noqa: E402
 
@@ -180,25 +181,22 @@ def _distance_bands_from_boundary(
     if float(band_width_um) <= 0:
         raise RuntimeError("Band width must be > 0 um.")
 
+    runtime = get_compute_runtime()
+    inside_mask = runtime.equal_scalar(boundary_mask.astype(np.uint8), 1).astype(bool, copy=False)
+    outside_mask = runtime.equal_scalar(boundary_mask.astype(np.uint8), 0).astype(bool, copy=False)
+    distance_input = runtime.equal_scalar(seed_mask.astype(np.uint8), 0).astype(bool, copy=False)
+
     distance_um = ndi.distance_transform_edt(
-        ~seed_mask,
+        distance_input,
         sampling=(float(pixel_size_um[1]), float(pixel_size_um[0])),
     ).astype(np.float32, copy=False)
     inside_distance_um = distance_um.copy()
-    inside_distance_um[~boundary_mask] = np.nan
+    inside_distance_um[outside_mask] = np.nan
     outside_distance_um = distance_um.copy()
-    outside_distance_um[boundary_mask] = np.nan
+    outside_distance_um[inside_mask] = np.nan
 
-    inside_band_index = np.full(boundary_mask.shape, -1, dtype=np.int32)
-    inside_band_index[boundary_mask] = np.floor(
-        np.clip(inside_distance_um[boundary_mask], 0, None) / float(band_width_um)
-    ).astype(np.int32)
-
-    outside_mask = ~boundary_mask
-    outside_band_index = np.full(boundary_mask.shape, -1, dtype=np.int32)
-    outside_band_index[outside_mask] = np.floor(
-        np.clip(outside_distance_um[outside_mask], 0, None) / float(band_width_um)
-    ).astype(np.int32)
+    inside_band_index = runtime.band_index(distance_um, inside_mask, float(band_width_um))
+    outside_band_index = runtime.band_index(distance_um, outside_mask, float(band_width_um))
     return inside_distance_um, outside_distance_um, inside_band_index, outside_band_index
 
 
@@ -315,7 +313,7 @@ def _norm_clip_local(arr: np.ndarray, lo_percentile: float = 0.0, hi_percentile:
     hi_v = float(np.nanpercentile(arr, hi_percentile))
     if not np.isfinite(lo_v) or not np.isfinite(hi_v) or hi_v <= lo_v:
         return np.zeros_like(arr, dtype=float)
-    return np.clip((arr - lo_v) / (hi_v - lo_v), 0.0, 1.0)
+    return get_compute_runtime().normalize_clip(arr, lo_v, hi_v)
 
 
 def _channel_rgba_for_distribution(

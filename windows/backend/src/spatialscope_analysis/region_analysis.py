@@ -19,6 +19,7 @@ from scipy import ndimage as ndi
 from skimage import measure, morphology, segmentation
 from skimage.measure import find_contours
 
+from .compute_runtime import get_compute_runtime
 from .io import load_any_tiff, save_uint8_tiff, save_uint16_tiff, safe_name, valid_pixel_size, write_json
 from .models import RegionParams
 from .visualization import add_colored_type_text, add_scalebar_20um, axis_off
@@ -315,7 +316,7 @@ def build_region_mask_for_type(
 ) -> np.ndarray:
     height, width = celltype_mask.shape
     type_id = name_to_id[type_name]
-    region = celltype_mask == type_id
+    region = get_compute_runtime().equal_scalar(celltype_mask, type_id).astype(bool, copy=False)
 
     if close_px > 0:
         if hasattr(morphology, "isotropic_closing"):
@@ -355,7 +356,7 @@ def build_region_mask_for_type(
     if keep_ids.size == 0:
         return np.zeros_like(region, dtype=bool)
 
-    return np.isin(lbl, keep_ids)
+    return get_compute_runtime().labels_in_set(lbl, keep_ids).astype(bool, copy=False)
 
 
 def _save_masks_as_uint8(masks: Dict[str, np.ndarray], save_dir: Path, suffix_template: str) -> Dict[str, Path]:

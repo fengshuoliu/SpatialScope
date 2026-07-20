@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 project_root = Path(SPECPATH)
 datas = []
@@ -8,6 +8,8 @@ datas += collect_data_files(
     "scipy",
     includes=["stats/_sobol_direction_numbers.npz"],
 )
+pyopencl_datas, pyopencl_binaries, pyopencl_hiddenimports = collect_all("pyopencl")
+datas += pyopencl_datas
 hiddenimports = [
     # Matplotlib chooses output renderers dynamically from savefig suffixes.
     # Keep both renderers explicit so Step 2 can export PNG and SVG after the
@@ -17,12 +19,12 @@ hiddenimports = [
     "openpyxl",
     "tifffile",
     "xlsxwriter",
-]
+] + pyopencl_hiddenimports
 
 analysis = Analysis(
     [str(project_root / "native_engine.py")],
     pathex=[str(project_root)],
-    binaries=[],
+    binaries=pyopencl_binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

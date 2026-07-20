@@ -322,10 +322,26 @@ public partial class MainWindow : Window
 
     private void UpdateCpuText()
     {
-        var gpuText = !string.IsNullOrWhiteSpace(_engine.AnalysisGpuBackend)
-            ? $"{_engine.DetectedGpus.Count} {_localization["Gpus"]}"
-            : _localization["CpuAnalysis"];
-        CpuValue.Text = $"{_engine.DefaultCpuWorkers} {_localization["Cpus"]} · {gpuText} · {_cpuMonitor.CpuPercent:0.0}%";
+        var cpuText = $"{_engine.DefaultCpuWorkers} {_localization["Cpus"]}";
+        var gpuBackend = _engine.AnalysisGpuBackend?.Trim();
+        if (string.IsNullOrWhiteSpace(gpuBackend))
+        {
+            CpuValue.Text = $"{cpuText} · {_localization["CpuAnalysis"]} · {_cpuMonitor.CpuPercent:0.0}%";
+            CpuValue.ToolTip = null;
+            AutomationProperties.SetHelpText(CpuValue, CpuValue.Text);
+            return;
+        }
+
+        var gpuText = $"{_engine.DetectedGpus.Count} {_localization["Gpus"]}";
+        CpuValue.Text = $"{cpuText} · {gpuBackend} · {gpuText} · {_cpuMonitor.CpuPercent:0.0}%";
+
+        var gpuNames = string.Join(Environment.NewLine, _engine.DetectedGpus);
+        CpuValue.ToolTip = string.IsNullOrWhiteSpace(gpuNames)
+            ? gpuBackend
+            : $"{gpuBackend}{Environment.NewLine}{gpuNames}";
+        AutomationProperties.SetHelpText(
+            CpuValue,
+            string.IsNullOrWhiteSpace(gpuNames) ? CpuValue.Text : $"{CpuValue.Text}. {gpuNames}");
     }
 
     private UIElement BuildSectionView(string key) => key switch

@@ -14,6 +14,7 @@ import numpy as np
 from matplotlib.patches import Rectangle
 from matplotlib.colors import ListedColormap
 
+from .compute_runtime import get_compute_runtime
 from .io import safe_name, to_image, valid_pixel_size
 
 
@@ -43,8 +44,7 @@ def norm_clip(arr: np.ndarray, lo_percentile: float = 0.0, hi_percentile: float 
     hi_v = np.nanpercentile(a, hi_percentile)
     if hi_v <= lo_v:
         return np.zeros_like(a, dtype=float)
-    a = (a - lo_v) / (hi_v - lo_v)
-    return np.clip(a, 0, 1)
+    return get_compute_runtime().normalize_clip(a, float(lo_v), float(hi_v))
 
 
 def hex_to_rgb01(hex_color: str) -> np.ndarray:
@@ -209,13 +209,20 @@ def overlay_multi_channels(
         if rgb is None:
             h, w = img.shape
             rgb = np.zeros((h, w, 3), dtype=float)
-        layer = np.clip(img[..., None] * hex_to_rgb01(ch2hex[channel]), 0.0, 1.0)
-        rgb = 1.0 - (1.0 - rgb) * (1.0 - layer)
+        rgb = get_compute_runtime().composite_rgb(
+            rgb,
+            img,
+            hex_to_rgb01(ch2hex[channel]),
+        )
 
     if white_channel and white_channel != "None" and float(white_weight) > 0:
         wimg = norm_clip(to_image(df, shapes, image_id, white_channel), hi_percentile=clip_hi)
-        wlayer = np.clip(float(white_weight) * wimg, 0.0, 1.0)[..., None]
-        rgb = 1.0 - (1.0 - rgb) * (1.0 - wlayer)
+        rgb = get_compute_runtime().composite_rgb(
+            rgb,
+            wimg,
+            np.ones(3, dtype=float),
+            weight=float(white_weight),
+        )
 
     rgb = np.clip(rgb, 0.0, 1.0)
 

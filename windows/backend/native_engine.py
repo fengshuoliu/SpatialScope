@@ -56,6 +56,11 @@ from src.spatialscope_analysis.celltype_assignment import (  # noqa: E402
     run_celltype_assignment_parameter_optimizer,
     save_celltype_config,
 )
+from src.spatialscope_analysis.compute_runtime import (  # noqa: E402
+    ComputeRuntime,
+    select_workflow_parallel_backend,
+    set_compute_runtime,
+)
 from src.spatialscope_analysis.distance_analysis import (  # noqa: E402
     run_boundary_distance_analysis,
     run_nearest_neighbor_analysis,
@@ -265,8 +270,29 @@ def _save_figure_preview(figure: plt.Figure, path: Path, *, dpi: int = 110) -> P
 
 
 class NativeEngine:
-    def __init__(self) -> None:
-        self.gpu_names = _detect_windows_gpus()
+    def __init__(self, compute_runtime: ComputeRuntime | None = None) -> None:
+        gpu_mode = str(os.environ.get("SPATIALSCOPE_GPU_MODE", "auto")).strip().lower()
+        gpu_enabled = gpu_mode not in {"0", "false", "off", "cpu", "disabled"}
+        parity_mode = str(os.environ.get("SPATIALSCOPE_GPU_PARITY_MODE", "off")).strip().lower()
+        existing_runtime = getattr(self, "compute_runtime", None)
+        self.compute_runtime = compute_runtime or existing_runtime or ComputeRuntime(
+            cpu_workers=CPU_COUNT,
+            enable_gpu=gpu_enabled,
+            parity_mode=parity_mode,
+            probe_devices=True,
+        )
+        set_compute_runtime(self.compute_runtime)
+        self.gpu_mode = gpu_mode
+        self.compute_capabilities = self.compute_runtime.capabilities()
+        compatible_gpus = [
+            descriptor
+            for descriptor in self.compute_capabilities.get("gpuDevices", [])
+            if bool(descriptor.get("compatible"))
+        ]
+        self.gpu_names = [str(descriptor.get("name") or "OpenCL GPU") for descriptor in compatible_gpus]
+        if gpu_mode in {"require", "required"} and not self.gpu_names:
+            reasons = "; ".join(self.compute_capabilities.get("fallbackReasons", []))
+            raise RuntimeError(f"OpenCL GPU execution was required but no compatible GPU was found. {reasons}".strip())
         self.config: PipelineConfig | None = None
         self.data_result: Dict[str, Any] | None = None
         self.nuclei_result: Dict[str, Any] | None = None
@@ -299,7 +325,13 @@ class NativeEngine:
         }
         if command not in handlers:
             raise KeyError(f"Unknown command: {command}")
-        return handlers[command](request_id, payload)
+        if command == "hello":
+            return handlers[command](request_id, payload)
+        with self.compute_runtime.request_scope(f"{request_id}:{command}") as compute_request:
+            result = handlers[command](request_id, payload)
+            result = dict(result)
+            result["compute"] = compute_request.telemetry()
+            return result
 
     def hello(self, _request_id: str, _payload: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -324,9 +356,13 @@ class NativeEngine:
             "compute": {
                 "logicalCpuCount": CPU_COUNT,
                 "defaultCpuWorkers": CPU_COUNT,
-                "gpuMode": "auto",
+                "gpuMode": self.gpu_mode,
                 "detectedGpus": list(self.gpu_names),
-                "analysisGpuBackend": None,
+                "analysisGpuBackend": "OpenCL" if self.gpu_names else None,
+                "gpuDevices": self.compute_runtime.device_descriptors(),
+                "compatibleGpuCount": len(self.gpu_names),
+                "parityMode": self.compute_runtime.parity_mode,
+                "fallbackReasons": list(self.compute_capabilities.get("fallbackReasons", [])),
             },
         }
 
@@ -1115,7 +1151,10 @@ class NativeEngine:
             max_evaluations=max_evaluations,
             exhaustive_limit=4096,
             parallel_workers=_cpu_budget(payload, "parallelWorkers", max_evaluations),
-            parallel_backend=str(payload.get("parallelBackend") or "threading"),
+            parallel_backend=select_workflow_parallel_backend(
+                payload.get("parallelBackend"),
+                shared_gpu_runtime_enabled=bool(self.gpu_names),
+            ),
             native_threads_per_worker=1,
             random_seed=int(payload.get("randomSeed", 42)),
             output_prefix="nuclei_native_optimizer",
@@ -1297,7 +1336,10 @@ class NativeEngine:
             max_evaluations=max_evaluations,
             exhaustive_limit=4096,
             parallel_workers=_cpu_budget(payload, "parallelWorkers", max_evaluations),
-            parallel_backend=str(payload.get("parallelBackend") or "threading"),
+            parallel_backend=select_workflow_parallel_backend(
+                payload.get("parallelBackend"),
+                shared_gpu_runtime_enabled=bool(self.gpu_names),
+            ),
             native_threads_per_worker=1,
             support_workers_per_worker=1,
             random_seed=int(payload.get("randomSeed", 42)),
@@ -1713,6 +1755,7 @@ def run_json_lines() -> int:
             payload = request.get("payload") or {}
             if command == "shutdown":
                 _emit({"type": "result", "id": request_id, "data": {"shutdown": True}})
+                engine.compute_runtime.close()
                 return 0
             with contextlib.redirect_stdout(sys.stderr):
                 data = engine.dispatch(request_id, command, payload)
@@ -1727,6 +1770,7 @@ def run_json_lines() -> int:
                     "errorType": error.__class__.__name__,
                 }
             )
+    engine.compute_runtime.close()
     return 0
 
 
