@@ -12,7 +12,7 @@ SpatialScope is distributed directly through [GitHub Releases](https://github.co
 
 ### Install
 
-1. [Download the latest SpatialScope for Windows](https://github.com/fengshuoliu/SpatialScope/releases/download/windows-v1.2.3/SpatialScope-Windows-x64-Setup.exe).
+1. [Download the latest SpatialScope for Windows](https://fengshuoliu.github.io/SpatialScope/download/windows/).
 2. Verify `SpatialScope-Windows-x64-Setup.exe` against `SHA256SUMS-Windows.txt` from the same Windows release.
 3. Run `SpatialScope-Windows-x64-Setup.exe` and follow the installation prompts.
 4. Launch SpatialScope from the Start menu or desktop shortcut.
@@ -33,7 +33,7 @@ Windows updates are manual. Close SpatialScope, download the latest Windows setu
 
 ### Install
 
-1. Download `SpatialScope-macOS-universal.dmg` from the pinned [macOS 1.2.1 release](https://github.com/fengshuoliu/SpatialScope/releases/tag/v1.2.1).
+1. [Download the latest SpatialScope for macOS](https://fengshuoliu.github.io/SpatialScope/download/macos/).
 2. Open the disk image.
 3. Drag `SpatialScope.app` to the Applications shortcut.
 4. Eject the SpatialScope disk image.
