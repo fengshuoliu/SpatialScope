@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en" data-platform="macos">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Download SpatialScope for macOS</title>
+    <link rel="icon" href="../../assets/SpatialScope-icon.png" />
+    <link rel="stylesheet" href="../../assets/site.css" />
+    <style>
+      .download-page { min-height: 100vh; display: grid; place-items: center; padding: 40px 20px; background: var(--soft); }
+      .download-card { width: min(100%, 620px); padding: clamp(32px, 7vw, 64px); border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
+      .download-card img { width: 64px; height: 64px; margin-bottom: 28px; border-radius: 8px; }
+      .download-card h1 { font-size: clamp(2rem, 7vw, 3.5rem); line-height: 1.05; }
+      .download-card p { color: var(--muted); }
+      .download-card .button { margin-top: 18px; }
+    </style>
+    <script defer src="../../assets/download.js"></script>
+  </head>
+  <body>
+    <main class="download-page">
+      <section class="download-card" aria-labelledby="download-title">
+        <img src="../../assets/SpatialScope-icon.png" alt="" />
+        <p class="kicker dark">SpatialScope</p>
+        <h1 id="download-title">Preparing your macOS download</h1>
+        <p id="download-status" role="status" aria-live="polite">Finding the latest published macOS release…</p>
+        <a id="download-fallback" class="button dark-button" href="https://github.com/fengshuoliu/SpatialScope/releases">View all releases</a>
+        <noscript><p>JavaScript is required for automatic platform selection. Use “View all releases” to download the macOS DMG manually.</p></noscript>
+      </section>
+    </main>
+  </body>
+</html>
