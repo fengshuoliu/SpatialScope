@@ -1,0 +1,153 @@
+<UserControl x:Class="SpatialScope.Windows.Controls.MarkerMultiSelectBox"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:automation="clr-namespace:System.Windows.Automation;assembly=PresentationCore"
+             x:Name="Root"
+             MinWidth="150"
+             MinHeight="34"
+             FontFamily="{DynamicResource InterfaceFont}">
+    <Grid>
+        <ToggleButton x:Name="PickerButton"
+                      MinHeight="34"
+                      Padding="9,5"
+                      HorizontalContentAlignment="Stretch"
+                      VerticalContentAlignment="Center"
+                      Background="#FAFFFFFF"
+                      BorderBrush="#CDD7DA"
+                      BorderThickness="1"
+                      Cursor="Hand"
+                      ToolTip="{Binding DisplayText, ElementName=Root}"
+                      automation:AutomationProperties.Name="{Binding PickerLabel, ElementName=Root}"
+                      automation:AutomationProperties.HelpText="{Binding PickerHelpText, ElementName=Root}"
+                      Checked="PickerButton_Checked"
+                      Unchecked="PickerButton_Unchecked"
+                      PreviewKeyDown="PickerButton_PreviewKeyDown">
+            <ToggleButton.Template>
+                <ControlTemplate TargetType="ToggleButton">
+                    <Border x:Name="PickerBorder"
+                            Padding="{TemplateBinding Padding}"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            CornerRadius="5">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="{Binding DisplayText, ElementName=Root}"
+                                       Foreground="{Binding DisplayForeground, ElementName=Root}"
+                                       TextTrimming="CharacterEllipsis"
+                                       VerticalAlignment="Center" />
+                            <TextBlock Grid.Column="1"
+                                       Text="&#xE70D;"
+                                       FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                                       FontSize="10"
+                                       Foreground="{DynamicResource SecondaryTextBrush}"
+                                       Margin="8,0,0,0"
+                                       VerticalAlignment="Center" />
+                        </Grid>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="PickerBorder" Property="BorderBrush" Value="#76AEB5" />
+                            <Setter TargetName="PickerBorder" Property="Background" Value="#FFFFFF" />
+                        </Trigger>
+                        <Trigger Property="IsKeyboardFocused" Value="True">
+                            <Setter TargetName="PickerBorder" Property="BorderBrush" Value="#F59E0B" />
+                            <Setter TargetName="PickerBorder" Property="BorderThickness" Value="2" />
+                        </Trigger>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="PickerBorder" Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                            <Setter TargetName="PickerBorder" Property="Background" Value="#F1F9FA" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.55" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </ToggleButton.Template>
+        </ToggleButton>
+
+        <Popup x:Name="PickerPopup"
+               Placement="Bottom"
+               PlacementTarget="{Binding ElementName=PickerButton}"
+               AllowsTransparency="True"
+               StaysOpen="False"
+               PopupAnimation="Fade"
+               Opened="PickerPopup_Opened"
+               Closed="PickerPopup_Closed"
+               PreviewKeyDown="PickerPopup_PreviewKeyDown">
+            <Border MinWidth="240"
+                    MaxWidth="360"
+                    Margin="0,4,0,8"
+                    Padding="10"
+                    Background="White"
+                    BorderBrush="#BFCBCD"
+                    BorderThickness="1"
+                    CornerRadius="7">
+                <Border.Effect>
+                    <DropShadowEffect BlurRadius="14"
+                                      ShadowDepth="3"
+                                      Opacity="0.18"
+                                      Color="#263238" />
+                </Border.Effect>
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Text="{Binding PickerLabel, ElementName=Root}"
+                               FontWeight="SemiBold"
+                               FontSize="13"
+                               Foreground="{DynamicResource TextBrush}"
+                               Margin="2,0,2,7" />
+
+                    <ScrollViewer Grid.Row="1"
+                                  MaxHeight="260"
+                                  VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled">
+                        <ItemsControl x:Name="OptionsItemsControl">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <CheckBox Content="{Binding Name}"
+                                              IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                              MinHeight="30"
+                                              Padding="3,4"
+                                              VerticalContentAlignment="Center"
+                                              automation:AutomationProperties.Name="{Binding Name}"
+                                              Click="MarkerCheckBox_Click" />
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+
+                    <Grid Grid.Row="2" Margin="0,8,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="{Binding SelectionCountText, ElementName=Root}"
+                                   Foreground="{DynamicResource SecondaryTextBrush}"
+                                   FontSize="12"
+                                   Margin="2,0,8,0"
+                                   VerticalAlignment="Center" />
+                        <Button Grid.Column="1"
+                                Content="{Binding ClearText, ElementName=Root}"
+                                MinHeight="30"
+                                Padding="10,4"
+                                Foreground="#086C77"
+                                Background="#EFF6F7"
+                                BorderBrush="#C8DEE1"
+                                BorderThickness="1"
+                                Cursor="Hand"
+                                automation:AutomationProperties.Name="{Binding ClearText, ElementName=Root}"
+                                Click="ClearButton_Click" />
+                    </Grid>
+                </Grid>
+            </Border>
+        </Popup>
+    </Grid>
+</UserControl>

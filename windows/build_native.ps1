@@ -91,6 +91,14 @@ try {
     Assert-Success "native Python compile check"
     & $PythonExe -m unittest discover -s $TestsRoot -p "test_compute_runtime.py" -v
     Assert-Success "CPU and OpenCL compute parity tests"
+    & $PythonExe -m unittest discover -s $TestsRoot -p "test_nuclei_optimizer_grouping.py" -v
+    Assert-Success "exact nuclei optimizer grouping tests"
+    & $PythonExe -m unittest discover -s $TestsRoot -p "test_celltype_vectorized_rules.py" -v
+    Assert-Success "exact vectorized cell-type rule tests"
+    & $PythonExe (Join-Path $TestsRoot "optimizer_acceleration_smoke.py") `
+        --work-root (Join-Path $WindowsRoot "build\optimizer-acceleration-smoke") `
+        --minimum-speedup 2.0
+    Assert-Success "exact optimizer parity and acceleration smoke test"
     & $PythonExe (Join-Path $BackendRoot "native_engine.py") --smoke-test
     Assert-Success "source Matplotlib renderer smoke test"
     dotnet build $ProjectPath --configuration Release

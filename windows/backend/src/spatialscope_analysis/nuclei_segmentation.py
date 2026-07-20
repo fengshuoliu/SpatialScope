@@ -5,6 +5,7 @@ import math
 import os
 import random
 from contextlib import nullcontext
+from functools import lru_cache
 from itertools import product
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
@@ -373,6 +374,7 @@ def _evaluate_explicit_combo_records(
     parallel_workers: int = 1,
     parallel_backend: str = "loky",
     native_threads_per_worker: int | None = 1,
+    compute_telemetry_state: Dict[str, bool] | None = None,
 ) -> List[Dict[str, Any]]:
     if not combo_values:
         return []
@@ -398,36 +400,61 @@ def _evaluate_explicit_combo_records(
         except Exception:
             native_threads_per_worker = 1
 
-    if parallel_workers > 1 and Parallel is not None and delayed is not None:
-        chunk_size = max(1, min(128, math.ceil(len(combo_records) / max(1, parallel_workers * 4))))
-        chunk_results = Parallel(
-            n_jobs=parallel_workers,
+    # The two image-preparation radii are aggressively quantized to integer
+    # pixels by the macOS-compatible algorithm.  Grouping by top-hat radius and
+    # then Gaussian radius lets every identical intermediate be computed once,
+    # while the component metrics remain independent for every candidate.
+    grouped_records = _group_optimizer_combo_records(
+        combo_records,
+        pixel_size_um=pixel_size_um,
+    )
+    telemetry_combo_index: int | None = None
+    if compute_telemetry_state is not None and not bool(compute_telemetry_state.get("recorded", False)):
+        telemetry_combo_index = min(record[0] for record in combo_records)
+        # Search phases call this function sequentially.  Reserve the single
+        # request-level compute operation before worker threads are started.
+        compute_telemetry_state["recorded"] = True
+
+    group_workers = max(1, min(parallel_workers, len(grouped_records)))
+    if group_workers > 1 and Parallel is not None and delayed is not None:
+        group_results = Parallel(
+            n_jobs=group_workers,
             backend=safe_backend,
             max_nbytes="16M",
             mmap_mode="r",
             batch_size=1,
             verbose=0,
         )(
-            delayed(_evaluate_sweep_combo_chunk)(
-                combo_chunk,
+            delayed(_evaluate_optimizer_tophat_group)(
+                tophat_radius_px,
+                records,
                 base_params,
-                dapi,
                 dapi_norm,
                 pixel_size_um,
                 native_threads=native_threads_per_worker,
+                telemetry_combo_index=telemetry_combo_index,
             )
-            for combo_chunk in _iter_explicit_combo_chunks(combo_records, chunk_size)
+            for tophat_radius_px, records in grouped_records
         )
-        return [row for chunk in chunk_results for row in chunk]
+        rows = [row for group in group_results for row in group]
+    else:
+        rows = []
+        for tophat_radius_px, records in grouped_records:
+            rows.extend(
+                _evaluate_optimizer_tophat_group(
+                    tophat_radius_px,
+                    records,
+                    base_params,
+                    dapi_norm,
+                    pixel_size_um,
+                    native_threads=native_threads_per_worker,
+                    telemetry_combo_index=telemetry_combo_index,
+                )
+            )
 
-    return _evaluate_sweep_combo_chunk(
-        combo_records,
-        base_params,
-        dapi,
-        dapi_norm,
-        pixel_size_um,
-        native_threads=native_threads_per_worker,
-    )
+    # Parallel groups finish out of combo order; the pre-optimization API
+    # returned candidate order and downstream adaptive search relies on it.
+    return sorted(rows, key=lambda row: int(row["combo_index"]))
 
 def _combo_from_linear_index(
     linear_index: int,
@@ -580,6 +607,7 @@ def _run_budgeted_search_records(
     native_threads_per_worker: int | None = 1,
     random_seed: int = 42,
     seed_rows: pd.DataFrame | None = None,
+    compute_telemetry_state: Dict[str, bool] | None = None,
 ) -> Dict[str, Any]:
     try:
         max_evaluations = max(0, int(max_evaluations))
@@ -687,6 +715,7 @@ def _run_budgeted_search_records(
             parallel_workers=parallel_workers,
             parallel_backend=parallel_backend,
             native_threads_per_worker=native_threads_per_worker,
+            compute_telemetry_state=compute_telemetry_state,
         )
         evaluated_rows.extend(batch_rows)
         stage_index += 1
@@ -778,6 +807,7 @@ def _screen_combo_pool_with_successive_halving(
     parallel_workers: int = 1,
     parallel_backend: str = "loky",
     native_threads_per_worker: int | None = 1,
+    compute_telemetry_state: Dict[str, bool] | None = None,
 ) -> Dict[str, Any]:
     working_pool = [tuple(float(v) for v in combo) for combo in combo_pool]
     survivor_count = max(1, min(int(survivor_count), len(working_pool)))
@@ -827,6 +857,7 @@ def _screen_combo_pool_with_successive_halving(
             parallel_workers=parallel_workers,
             parallel_backend=parallel_backend,
             native_threads_per_worker=native_threads_per_worker,
+            compute_telemetry_state=compute_telemetry_state,
         )
         screened_count += len(current_pool)
         ranked_screen = rank_nuclei_parameter_sweep_results(pd.DataFrame(screen_rows))
@@ -944,6 +975,7 @@ def _run_evolutionary_search_records(
     native_threads_per_worker: int | None = 1,
     random_seed: int = 42,
     seed_rows: pd.DataFrame | None = None,
+    compute_telemetry_state: Dict[str, bool] | None = None,
 ) -> Dict[str, Any]:
     try:
         max_evaluations = max(0, int(max_evaluations))
@@ -1037,6 +1069,7 @@ def _run_evolutionary_search_records(
             parallel_workers=parallel_workers,
             parallel_backend=parallel_backend,
             native_threads_per_worker=native_threads_per_worker,
+            compute_telemetry_state=compute_telemetry_state,
         )
         screened_candidate_count += int(screen_result.get("n_screened", 0))
         screening_round_count += int(screen_result.get("n_rounds", 0))
@@ -1054,6 +1087,7 @@ def _run_evolutionary_search_records(
             parallel_workers=parallel_workers,
             parallel_backend=parallel_backend,
             native_threads_per_worker=native_threads_per_worker,
+            compute_telemetry_state=compute_telemetry_state,
         )
         evaluated_rows.extend(batch_rows)
         generation_index += 1
@@ -1158,6 +1192,124 @@ def _run_evolutionary_search_records(
     }
 
 
+def _optimizer_combo_preprocess_radii(
+    combo: Sequence[float],
+    pixel_size_um: Tuple[float, float],
+) -> Tuple[int, int]:
+    iso_scale_um = float(np.sqrt(float(pixel_size_um[0]) * float(pixel_size_um[1])))
+    safe_scale = max(1e-12, iso_scale_um)
+    tophat_index = SWEEP_PARAM_ORDER.index("tophat_radius_um")
+    sigma_index = SWEEP_PARAM_ORDER.index("gauss_sigma_um")
+    tophat_radius_px = min(
+        _swift_round_nonnegative(float(combo[tophat_index]) / safe_scale),
+        30,
+    )
+    sigma_radius_px = _swift_round_nonnegative(float(combo[sigma_index]) / safe_scale)
+    if sigma_radius_px > 0:
+        sigma_radius_px = min(max(1, sigma_radius_px), 12)
+    return int(tophat_radius_px), int(sigma_radius_px)
+
+
+def _group_optimizer_combo_records(
+    combo_records: Sequence[Tuple[int, Tuple[float, ...]]],
+    *,
+    pixel_size_um: Tuple[float, float],
+) -> List[Tuple[int, List[Tuple[int, Tuple[float, ...]]]]]:
+    grouped: Dict[int, List[Tuple[int, Tuple[float, ...]]]] = {}
+    for combo_index, combo in combo_records:
+        tophat_radius_px, _ = _optimizer_combo_preprocess_radii(combo, pixel_size_um)
+        grouped.setdefault(tophat_radius_px, []).append((int(combo_index), combo))
+    return list(grouped.items())
+
+
+def _nuclei_optimizer_result_row(
+    combo_index: int,
+    params: NucleiParams,
+) -> Dict[str, Any]:
+    row: Dict[str, Any] = {
+        "combo_index": int(combo_index),
+        "nucleus_channel": params.nucleus_channel,
+    }
+    row.update({SWEEP_PARAM_LABELS[field]: float(getattr(params, field)) for field in SWEEP_PARAM_ORDER})
+    return row
+
+
+def _evaluate_optimizer_tophat_group(
+    tophat_radius_px: int,
+    combo_records: Sequence[Tuple[int, Tuple[float, ...]]],
+    base_params: NucleiParams,
+    dapi_norm: np.ndarray,
+    pixel_size_um: Tuple[float, float],
+    native_threads: int | None = 1,
+    telemetry_combo_index: int | None = None,
+) -> List[Dict[str, Any]]:
+    prepared_records: List[Tuple[int, NucleiParams, int]] = []
+    for combo_index, combo in combo_records:
+        overrides = {field: float(value) for field, value in zip(SWEEP_PARAM_ORDER, combo)}
+        params = _coerce_nuclei_params(base_params, overrides)
+        _validate_nuclei_params(params)
+        _, sigma_radius_px = _optimizer_combo_preprocess_radii(combo, pixel_size_um)
+        prepared_records.append((int(combo_index), params, int(sigma_radius_px)))
+
+    sigma_groups: Dict[int, List[Tuple[int, NucleiParams]]] = {}
+    for combo_index, params, sigma_radius_px in prepared_records:
+        sigma_groups.setdefault(sigma_radius_px, []).append((combo_index, params))
+
+    rows: List[Dict[str, Any]] = []
+    with _thread_limit_context(native_threads):
+        base_work = dapi_norm.astype(np.float64, copy=True)
+        if tophat_radius_px > 0:
+            background = _truncated_box_blur(base_work, int(tophat_radius_px))
+            base_work = np.maximum(0.0, base_work - background)
+
+        for sigma_radius_px, records in sigma_groups.items():
+            work = (
+                base_work
+                if sigma_radius_px <= 0
+                else _truncated_box_blur(base_work, int(sigma_radius_px))
+            )
+            work_mean = float(np.mean(work))
+            work_std = float(np.std(work))
+
+            for combo_index, params in records:
+                row = _nuclei_optimizer_result_row(combo_index, params)
+                try:
+                    component_labels, component_areas, valid_components = _nuclei_components_from_work(
+                        work,
+                        pixel_size_um,
+                        params,
+                        work_mean=work_mean,
+                        work_std=work_std,
+                    )
+                    n_nuclei = int(valid_components.size)
+                    if combo_index == telemetry_combo_index:
+                        # One exact, scientifically relevant membership pass per
+                        # optimizer request keeps CPU/OpenCL execution observable
+                        # without rebuilding every candidate's full label image.
+                        positive_mask = get_compute_runtime().labels_in_set(
+                            component_labels,
+                            valid_components,
+                        )
+                        positive_px = int(np.count_nonzero(positive_mask))
+                    else:
+                        positive_px = int(component_areas[valid_components].sum())
+                    row["n_nuclei"] = n_nuclei
+                    row["positive_pixel_fraction"] = (
+                        float(positive_px / component_labels.size) if component_labels.size > 0 else 0.0
+                    )
+                    row["mean_pixels_per_nucleus"] = (
+                        float(positive_px / n_nuclei) if n_nuclei > 0 else 0.0
+                    )
+                    row["error"] = ""
+                except Exception as exc:  # pragma: no cover - defensive UI guard
+                    row["n_nuclei"] = np.nan
+                    row["positive_pixel_fraction"] = np.nan
+                    row["mean_pixels_per_nucleus"] = np.nan
+                    row["error"] = str(exc)
+                rows.append(row)
+    return rows
+
+
 def _evaluate_sweep_combo_chunk(
     combo_chunk: Sequence[Tuple[int, Tuple[float, ...]]],
     base_params: NucleiParams,
@@ -1172,11 +1324,7 @@ def _evaluate_sweep_combo_chunk(
             overrides = {field: float(value) for field, value in zip(SWEEP_PARAM_ORDER, combo)}
             params = _coerce_nuclei_params(base_params, overrides)
             _validate_nuclei_params(params)
-            row: Dict[str, Any] = {
-                "combo_index": int(combo_index),
-                "nucleus_channel": params.nucleus_channel,
-            }
-            row.update({SWEEP_PARAM_LABELS[field]: float(getattr(params, field)) for field in SWEEP_PARAM_ORDER})
+            row = _nuclei_optimizer_result_row(combo_index, params)
             try:
                 labels = segment_nuclei_from_prepared_images(dapi, dapi_norm, pixel_size_um, params)
                 n_nuclei = int(labels.max())
@@ -1437,65 +1585,81 @@ def _pixel_converters(pixel_size_um: Tuple[float, float]):
     return px_um_x, px_um_y, um_to_px_x, um_to_px_y, um_to_px_iso
 
 
-def segment_nuclei_from_prepared_images(
-    dapi: np.ndarray,
+@lru_cache(maxsize=256)
+def _truncated_box_blur_edge_counts(length: int, radius: int) -> np.ndarray:
+    """Cache the exact edge divisor used by SciPy's constant-mode box blur."""
+    size = int(radius) * 2 + 1
+    counts = ndi.uniform_filter1d(
+        np.ones(int(length), dtype=np.float64),
+        size=size,
+        mode="constant",
+        cval=0.0,
+    ) * float(size)
+    counts.setflags(write=False)
+    return counts
+
+
+def _truncated_box_blur(image: np.ndarray, radius: int) -> np.ndarray:
+    if radius <= 0:
+        return image.astype(np.float64, copy=False)
+    size = int(radius) * 2 + 1
+    values = image.astype(np.float64, copy=False)
+    horizontal_sum = ndi.uniform_filter1d(
+        values,
+        size=size,
+        axis=1,
+        mode="constant",
+        cval=0.0,
+    ) * float(size)
+    horizontal_count = _truncated_box_blur_edge_counts(values.shape[1], int(radius))
+    horizontal = np.divide(
+        horizontal_sum,
+        horizontal_count[np.newaxis, :],
+        out=np.zeros_like(horizontal_sum),
+        where=horizontal_count[np.newaxis, :] > 0,
+    )
+    vertical_sum = ndi.uniform_filter1d(
+        horizontal,
+        size=size,
+        axis=0,
+        mode="constant",
+        cval=0.0,
+    ) * float(size)
+    vertical_count = _truncated_box_blur_edge_counts(values.shape[0], int(radius))
+    return np.divide(
+        vertical_sum,
+        vertical_count[:, np.newaxis],
+        out=np.zeros_like(vertical_sum),
+        where=vertical_count[:, np.newaxis] > 0,
+    )
+
+
+def _prepare_nuclei_work_for_radii(
     dapi_norm: np.ndarray,
+    tophat_radius_px: int,
+    sigma_radius_px: int,
+) -> np.ndarray:
+    work = dapi_norm.astype(np.float64, copy=True)
+    if tophat_radius_px > 0:
+        background = _truncated_box_blur(work, min(int(tophat_radius_px), 30))
+        work = np.maximum(0.0, work - background)
+    if sigma_radius_px > 0:
+        work = _truncated_box_blur(work, min(max(1, int(sigma_radius_px)), 12))
+    return work
+
+
+def _nuclei_components_from_work(
+    work: np.ndarray,
     pixel_size_um: Tuple[float, float],
     params: NucleiParams,
-) -> np.ndarray:
-    del dapi  # The macOS implementation operates on the normalized channel.
+    *,
+    work_mean: float | None = None,
+    work_std: float | None = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     px_um_x, px_um_y, _, _, _ = _pixel_converters(pixel_size_um)
     iso_scale_um = np.sqrt(px_um_x * px_um_y)
-
-    def truncated_box_blur(image: np.ndarray, radius: int) -> np.ndarray:
-        if radius <= 0:
-            return image.astype(np.float64, copy=False)
-        size = radius * 2 + 1
-        values = image.astype(np.float64, copy=False)
-        ones = np.ones(values.shape, dtype=np.float64)
-        horizontal_sum = ndi.uniform_filter1d(
-            values, size=size, axis=1, mode="constant", cval=0.0
-        ) * float(size)
-        horizontal_count = ndi.uniform_filter1d(
-            ones, size=size, axis=1, mode="constant", cval=0.0
-        ) * float(size)
-        horizontal = np.divide(
-            horizontal_sum,
-            horizontal_count,
-            out=np.zeros_like(horizontal_sum),
-            where=horizontal_count > 0,
-        )
-        vertical_sum = ndi.uniform_filter1d(
-            horizontal, size=size, axis=0, mode="constant", cval=0.0
-        ) * float(size)
-        vertical_count = ndi.uniform_filter1d(
-            ones, size=size, axis=0, mode="constant", cval=0.0
-        ) * float(size)
-        return np.divide(
-            vertical_sum,
-            vertical_count,
-            out=np.zeros_like(vertical_sum),
-            where=vertical_count > 0,
-        )
-
-    # Match SpatialScope/Services/NucleiSegmenter.swift so the same saved
-    # parameters produce comparable labels on macOS and Windows.
-    work = dapi_norm.astype(np.float64, copy=True)
-    tophat_px = _swift_round_nonnegative(
-        float(params.tophat_radius_um) / max(1e-12, iso_scale_um)
-    )
-    if tophat_px > 0:
-        background = truncated_box_blur(work, min(tophat_px, 30))
-        work = np.maximum(0.0, work - background)
-
-    sigma_px = _swift_round_nonnegative(
-        float(params.gauss_sigma_um) / max(1e-12, iso_scale_um)
-    )
-    if sigma_px > 0:
-        work = truncated_box_blur(work, min(max(1, sigma_px), 12))
-
-    mean = float(np.mean(work))
-    std = float(np.std(work))
+    mean = float(np.mean(work)) if work_mean is None else float(work_mean)
+    std = float(np.std(work)) if work_std is None else float(work_std)
     threshold_factor = (
         0.56
         + float(params.local_offset) * 2.0
@@ -1521,6 +1685,37 @@ def segment_nuclei_from_prepared_images(
         (component_areas >= min_area_px) & (component_areas <= max_area_px)
     )
     valid_components = valid_components[valid_components > 0]
+    return component_labels, component_areas, valid_components
+
+
+def segment_nuclei_from_prepared_images(
+    dapi: np.ndarray,
+    dapi_norm: np.ndarray,
+    pixel_size_um: Tuple[float, float],
+    params: NucleiParams,
+) -> np.ndarray:
+    del dapi  # The macOS implementation operates on the normalized channel.
+    px_um_x, px_um_y, _, _, _ = _pixel_converters(pixel_size_um)
+    iso_scale_um = np.sqrt(px_um_x * px_um_y)
+
+    # Match SpatialScope/Services/NucleiSegmenter.swift so the same saved
+    # parameters produce comparable labels on macOS and Windows.
+    tophat_px = _swift_round_nonnegative(
+        float(params.tophat_radius_um) / max(1e-12, iso_scale_um)
+    )
+    sigma_px = _swift_round_nonnegative(
+        float(params.gauss_sigma_um) / max(1e-12, iso_scale_um)
+    )
+    work = _prepare_nuclei_work_for_radii(
+        dapi_norm,
+        min(tophat_px, 30),
+        min(max(1, sigma_px), 12) if sigma_px > 0 else 0,
+    )
+    component_labels, component_areas, valid_components = _nuclei_components_from_work(
+        work,
+        pixel_size_um,
+        params,
+    )
     remap = np.zeros(component_areas.shape[0], dtype=np.int32)
     remap[valid_components] = np.arange(1, valid_components.size + 1, dtype=np.int32)
     # Canonical relabeling is an exact integer lookup, so every compatible GPU
@@ -1974,6 +2169,7 @@ def run_nuclei_parameter_optimizer(
         roi_sampled_area_fraction = float(roi_subset.get("sampled_area_fraction", 1.0))
         roi_mosaic_shape = tuple(int(v) for v in roi_subset.get("mosaic_shape", dapi.shape))
     dapi_norm = normalize_nucleus_image(dapi)
+    compute_telemetry_state = {"recorded": False}
 
     search_mode = "adaptive_global_search"
     evaluated_priority_combinations = 0
@@ -1997,6 +2193,7 @@ def run_nuclei_parameter_optimizer(
             parallel_workers=parallel_workers,
             parallel_backend=parallel_backend,
             native_threads_per_worker=native_threads_per_worker,
+            compute_telemetry_state=compute_telemetry_state,
         )
         df_results = _deduplicate_nuclei_result_rows(pd.DataFrame(evaluated_rows))
         if len(df_results) > 0:
@@ -2021,6 +2218,7 @@ def run_nuclei_parameter_optimizer(
                 parallel_backend=parallel_backend,
                 native_threads_per_worker=native_threads_per_worker,
                 random_seed=int(random_seed),
+                compute_telemetry_state=compute_telemetry_state,
             )
             priority_results = priority_search_result["results"]
             priority_ranked_results = priority_search_result["ranked_results"]
@@ -2044,6 +2242,7 @@ def run_nuclei_parameter_optimizer(
                 native_threads_per_worker=native_threads_per_worker,
                 random_seed=int(random_seed) + 1,
                 seed_rows=priority_ranked_results,
+                compute_telemetry_state=compute_telemetry_state,
             )
             expansion_results = expansion_search_result["results"]
             evaluated_expansion_combinations = int(expansion_search_result["n_evaluated"])
@@ -2070,6 +2269,7 @@ def run_nuclei_parameter_optimizer(
                 parallel_backend=parallel_backend,
                 native_threads_per_worker=native_threads_per_worker,
                 random_seed=int(random_seed),
+                compute_telemetry_state=compute_telemetry_state,
             )
             df_results = fallback_search_result["results"]
             evaluated_expansion_combinations = int(fallback_search_result["n_evaluated"])
