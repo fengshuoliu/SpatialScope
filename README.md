@@ -19,6 +19,12 @@ SpatialScope for macOS supports macOS 13 or later on Apple Silicon and Intel Mac
 - [Installation and update instructions](docs/INSTALLATION.md)
 - [Project website](https://fengshuoliu.github.io/SpatialScope/)
 
+## Demonstration dataset
+
+[Download the SpatialScope demonstration dataset](https://github.com/fengshuoliu/SpatialScope/releases/download/demo-dataset-v1.0/SpatialScope-Demo-Dataset-v1.0.zip) to test the same aligned marker matrices and inspect a complete set of example outputs on macOS or Windows. Select the extracted `test_input_files` folder as the app input and use a new, empty folder for your own results.
+
+The complete testing workflow, dataset contents, integrity checks, and interpretation notes are documented in the [`demo_dataset` guide](demo_dataset/README.md).
+
 ## Platform roadmap
 
 | Platform | Status | Repository location |
@@ -66,7 +72,7 @@ On macOS, SpatialScope uses [Sparkle](https://sparkle-project.org/) with EdDSA-s
 
 ## Acknowledgements
 
-Image credit: Example figures were provided by Dr. Ling Wu from the [Zhang Lab](https://github.com/xzhanglab).
+The demonstration input data and example output files were provided by Dr. Ling Wu from the [Zhang Lab](https://github.com/xzhanglab). The cross-platform [demonstration dataset](demo_dataset/README.md) is available for testing SpatialScope on macOS and Windows.
 
 ## Citation
 
