@@ -1,6 +1,6 @@
 # SpatialScope User Manual
 
-**Applies to:** SpatialScope 1.2.1 for macOS and SpatialScope 1.2.5 for Windows<br>
+**Applies to:** SpatialScope 1.2.1 for macOS and SpatialScope 1.2.6 for Windows<br>
 **Workflow:** image preparation → aligned channel CSV files → composite preview → nuclei → cell types → neighborhoods → regions → distribution → distances → exports
 
 > The screenshots show the macOS interface with an example 16-channel dataset. Windows uses the same nine-stage analysis workflow and output contracts in a native WPF desktop layout, so control placement differs slightly. Marker names, colors, cell types, counts, and results will vary by dataset.
@@ -240,7 +240,7 @@ Use this checklist for a standard full run:
 6. In **Cell Type Assignment**, define and save marker rules. Tune or screen assignment parameters, then run the final assignment.
 7. In **Neighborhood Analysis**, choose a square size and run the analysis.
 8. In **Region Analysis**, select ROI-defining cell types, tune ROI morphology, and run ROI identification. Optionally create adjusted ROIs and customized figures.
-9. In **Cell Distribution** on Windows 1.2.5, choose a saved Region boundary, band width, and one or more cell types, then run once to generate both the boundary-band map and linked density plot. On macOS, generate Region masks before Cell density; the separate Cell cluster distribution tab also requires Neighborhood Analysis.
+9. In **Cell Distribution** on Windows 1.2.6, choose a saved Region boundary, band width, and one or more cell types, then run once to generate both the boundary-band map and linked density plot. On macOS, generate Region masks before Cell density; the separate Cell cluster distribution tab also requires Neighborhood Analysis.
 10. In **Distance Analysis**, run nearest-neighbor and/or boundary-distance analyses.
 11. In **Results & Exports**, refresh the list and reveal the output folder.
 
@@ -755,7 +755,7 @@ The app saves both the customized display and an original unmodified comparison 
 
 ## 11. Step 7 — Cell Distribution
 
-Windows 1.2.5 presents two numbered subsections: **Boundary-banded regions** and **Cell density by boundary distance**. One Windows run generates both linked results from the same boundary and band width. macOS presents the corresponding **Region masks** and **Cell density** tabs separately and also includes **Cell cluster distribution**.
+Windows 1.2.6 presents two numbered subsections: **Boundary-banded regions** and **Cell density by boundary distance**. One Windows run generates both linked results from the same boundary and band width. macOS presents the corresponding **Region masks** and **Cell density** tabs separately and also includes **Cell cluster distribution**.
 
 ### 11.1 Cell Distribution runtime
 
@@ -819,7 +819,7 @@ If you change or manually adjust an ROI, rerun Cell Distribution so the band map
 
 ### 11.4 Generate Cell cluster distribution (macOS)
 
-The Cell cluster distribution tab is currently exposed by the macOS app. Prerequisites include a completed Neighborhood Analysis. Windows 1.2.5 does not expose this third tab in its native interface.
+The Cell cluster distribution tab is currently exposed by the macOS app. Prerequisites include a completed Neighborhood Analysis. Windows 1.2.6 does not expose this third tab in its native interface.
 
 1. Open **Cell cluster distribution**.
 2. Select one or more Region Analysis boundaries. If no explicit selection is stored, the app begins with up to the first three; click **Use All Boundaries** to select every boundary.

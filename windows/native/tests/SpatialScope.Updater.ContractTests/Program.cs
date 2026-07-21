@@ -16,6 +16,7 @@ var tests = new List<(string Name, Func<Task> Run)>
     ("checksum parsing is strict", ChecksumParsingIsStrictAsync),
     ("automatic check state is throttled", AutomaticCheckStateIsThrottledAsync),
     ("installer launch arguments are structured and scoped", InstallerLaunchArgumentsAreStructuredAndScopedAsync),
+    ("QA instance mutex override is isolated and validated", QaInstanceMutexOverrideIsIsolatedAndValidatedAsync),
 };
 if (args.Contains("--live-github", StringComparer.OrdinalIgnoreCase))
     tests.Add(("live GitHub feed matches the Windows release contract", LiveGitHubFeedMatchesContractAsync));
@@ -285,6 +286,62 @@ static async Task InstallerLaunchArgumentsAreStructuredAndScopedAsync()
         finally
         {
             Directory.Delete(escapedDirectory, recursive: true);
+        }
+    });
+}
+
+static async Task QaInstanceMutexOverrideIsIsolatedAndValidatedAsync()
+{
+    var variable = UpdateInstallerLauncher.QaInstanceMutexEnvironmentVariable;
+    var previous = Environment.GetEnvironmentVariable(variable);
+    await WithTemporaryDirectoryAsync(async root =>
+    {
+        var isolated = $@"Local\SpatialScope.Windows.Application.QA.{Guid.NewGuid():N}";
+        var markerPath = Path.Combine(root, UpdateInstallerLauncher.QaSmokeMarkerFileName);
+        await File.WriteAllTextAsync(markerPath, "installer smoke test");
+
+        try
+        {
+            Environment.SetEnvironmentVariable(variable, isolated);
+            Assert(
+                UpdateInstallerLauncher.ResolveInstanceMutexName(
+                    [UpdateInstallerLauncher.QaSmokeLaunchArgument],
+                    root) == isolated,
+                "A marked, explicitly launched QA app did not select its isolated mutex.");
+            Assert(
+                UpdateInstallerLauncher.ResolveInstanceMutexName([], root)
+                    == UpdateInstallerLauncher.InstanceMutexName,
+                "A QA marker and inherited environment variable bypassed the explicit launch gate.");
+
+            File.Delete(markerPath);
+            Assert(
+                UpdateInstallerLauncher.ResolveInstanceMutexName(
+                    [UpdateInstallerLauncher.QaSmokeLaunchArgument],
+                    root) == UpdateInstallerLauncher.InstanceMutexName,
+                "A launch argument and inherited environment variable bypassed the installer marker gate.");
+
+            await File.WriteAllTextAsync(markerPath, "installer smoke test");
+            foreach (var invalid in new[]
+                     {
+                         @"Local\Unrelated.Application",
+                         @"Local\SpatialScope.Windows.Application.QA.0123456789abcdef0123456789abcde\",
+                         @"Local\SpatialScope.Windows.Application.QA.0123456789abcdef0123456789abcdef0",
+                     })
+            {
+                Environment.SetEnvironmentVariable(variable, invalid);
+                Assert(
+                    UpdateInstallerLauncher.ResolveInstanceMutexName(
+                        [UpdateInstallerLauncher.QaSmokeLaunchArgument],
+                        root) == UpdateInstallerLauncher.InstanceMutexName,
+                    $"An invalid QA mutex name was accepted: {invalid}");
+                Assert(
+                    !UpdateInstallerLauncher.IsValidQaInstanceMutexName(invalid),
+                    $"QA mutex validation accepted an invalid name: {invalid}");
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variable, previous);
         }
     });
 }

@@ -2,6 +2,14 @@
 
 All notable changes to SpatialScope are documented here.
 
+## 1.2.6 - 2026-07-20 (Windows)
+
+- Fixed Region Analysis manual ROI editing so displayed cell types and boundaries refresh immediately when their selections change.
+- Added a native WPF regression test that overwrites one stable preview path and verifies the Draw/Edit ROI canvas reloads the new pixels instead of a cached bitmap.
+- Changed cell-type optimizer recommendations to minimize unresolved cells, exposed every suggested parameter for review, and made Apply validate and preserve the exact recommendation through the final run.
+- Expanded scientific workflow smoke coverage for same-path manual-editor preview updates and recommendation handoff behavior.
+- Preserved the macOS application, Sparkle appcast, release tags, and artifacts unchanged.
+
 ## 1.2.5 - 2026-07-20 (Windows)
 
 - Added a native automatic update check against the stable Windows channel on GitHub Releases, plus a manual **Check for updates** action in the sidebar.

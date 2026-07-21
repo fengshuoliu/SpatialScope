@@ -552,6 +552,27 @@ CELLTYPE_OPTIMIZER_PARAM_LABELS = {
     "ambiguous_min_gap": "AMBIGUOUS_MIN_GAP",
 }
 
+RESERVED_CELLTYPE_NAMES = frozenset({"unassigned", "ambiguous"})
+
+
+def validate_celltype_config_names(celltype_cfg: Sequence[Dict[str, Any]]) -> None:
+    """Protect assignment-status labels and result columns from name collisions."""
+    seen: Dict[str, str] = {}
+    for index, cell_type in enumerate(celltype_cfg):
+        name = str(cell_type.get("name") or "").strip()
+        if not name:
+            raise ValueError(f"Cell type {index + 1} needs a nonempty name.")
+        normalized = name.casefold()
+        if normalized in RESERVED_CELLTYPE_NAMES:
+            raise ValueError(
+                f"Cell type name {name!r} is reserved for assignment results. Choose a different name."
+            )
+        if normalized in seen:
+            raise ValueError(
+                f"Cell type names must be unique (case-insensitive): {seen[normalized]!r} and {name!r}."
+            )
+        seen[normalized] = name
+
 
 def make_celltype_assignment_parameter_sweep_figure(
     df_results: pd.DataFrame,
@@ -654,6 +675,7 @@ def prepare_celltype_assignment_optimizer_data(
     shapes: Dict[Tuple[str, str], Tuple[int, int]] | None = None,
 ) -> CelltypeAssignmentPreparedData:
     """Prepare immutable inputs once instead of once per parameter candidate."""
+    validate_celltype_config_names(celltype_cfg)
     labels = np.asarray(labels, dtype=np.int32)
     if labels.ndim != 2:
         raise RuntimeError(f"Nuclei labels must be a 2D label image, got shape={labels.shape}")
@@ -743,6 +765,7 @@ def _run_celltype_assignment_impl(
 ) -> Dict[str, Any]:
     if not celltype_cfg:
         raise RuntimeError("CELLTYPE_CFG is empty.")
+    validate_celltype_config_names(celltype_cfg)
 
     params = _coerce_assignment_params(params)
     folder = Path(folder)
@@ -1596,15 +1619,41 @@ def run_celltype_assignment(
     )
 
 
-def rank_celltype_assignment_parameter_sweep_results(
+def _rank_celltype_assignment_results_by_unresolved(
     df_results: pd.DataFrame,
     defined_celltype_names: Sequence[str] | None = None,
 ) -> pd.DataFrame:
+    """Rank successful combinations by the documented unresolved-cell objective.
+
+    The primary score is always ``Unassigned + Ambiguous``.  Recompute it from
+    the two status columns so a stale or caller-supplied ``unresolved_total``
+    column can never select the recommendation.  Stable, numeric tie-breakers
+    make the result deterministic across CSV reloads and shuffled input rows.
+    """
     ranked = df_results.copy()
     if "error" in ranked.columns:
         ranked = ranked[ranked["error"].fillna("") == ""].copy()
     if len(ranked) == 0:
         return ranked
+
+    required_status_columns = ("count::Unassigned", "count::Ambiguous")
+    if any(column not in ranked.columns for column in required_status_columns):
+        return ranked.iloc[0:0].copy()
+
+    for column in required_status_columns:
+        values = pd.to_numeric(ranked[column], errors="coerce")
+        ranked[column] = values
+        ranked = ranked[
+            np.isfinite(ranked[column])
+            & (ranked[column] >= 0)
+            & ((ranked[column] % 1) == 0)
+        ].copy()
+    if len(ranked) == 0:
+        return ranked
+
+    ranked["unresolved_total"] = (
+        ranked["count::Unassigned"] + ranked["count::Ambiguous"]
+    )
 
     if defined_celltype_names is None:
         defined_celltype_names = [
@@ -1621,19 +1670,39 @@ def rank_celltype_assignment_parameter_sweep_results(
             if col in ranked.columns:
                 total = total + pd.to_numeric(ranked[col], errors="coerce").fillna(0).to_numpy()
         ranked["assigned_defined_total"] = total
+    else:
+        ranked["assigned_defined_total"] = pd.to_numeric(
+            ranked["assigned_defined_total"], errors="coerce"
+        ).fillna(0)
 
-    sort_cols = ["assigned_defined_total"]
-    ascending = [False]
-    if "count::Ambiguous" in ranked.columns:
-        sort_cols.append("count::Ambiguous")
-        ascending.append(True)
-    if "count::Unassigned" in ranked.columns:
-        sort_cols.append("count::Unassigned")
-        ascending.append(True)
-    if "combo_index" in ranked.columns:
-        sort_cols.append("combo_index")
-        ascending.append(True)
-    return ranked.sort_values(sort_cols, ascending=ascending).reset_index(drop=True)
+    ranked["__combo_order"] = (
+        pd.to_numeric(ranked["combo_index"], errors="coerce")
+        if "combo_index" in ranked.columns
+        else pd.Series(ranked.index, index=ranked.index, dtype=float)
+    )
+    ranked["__combo_order"] = ranked["__combo_order"].fillna(np.inf)
+    ranked = ranked.sort_values(
+        [
+            "unresolved_total",
+            "count::Ambiguous",
+            "count::Unassigned",
+            "assigned_defined_total",
+            "__combo_order",
+        ],
+        ascending=[True, True, True, False, True],
+        kind="mergesort",
+    ).drop(columns=["__combo_order"])
+    return ranked.reset_index(drop=True)
+
+
+def rank_celltype_assignment_parameter_sweep_results(
+    df_results: pd.DataFrame,
+    defined_celltype_names: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    return _rank_celltype_assignment_results_by_unresolved(
+        df_results,
+        defined_celltype_names=defined_celltype_names,
+    )
 
 
 def recommend_celltype_assignment_parameter_sweep_result(
@@ -1788,55 +1857,10 @@ def rank_celltype_assignment_optimizer_results(
     df_results: pd.DataFrame,
     defined_celltype_names: Sequence[str] | None = None,
 ) -> pd.DataFrame:
-    ranked = df_results.copy()
-    if "error" in ranked.columns:
-        ranked = ranked[ranked["error"].fillna("") == ""].copy()
-    if len(ranked) == 0:
-        return ranked
-
-    if defined_celltype_names is None:
-        defined_celltype_names = [
-            col.replace("count::", "")
-            for col in ranked.columns
-            if str(col).startswith("count::") and col not in {"count::Unassigned", "count::Ambiguous"}
-        ]
-    defined_celltype_names = list(defined_celltype_names)
-
-    if "assigned_defined_total" not in ranked.columns:
-        total = np.zeros(len(ranked), dtype=float)
-        for name in defined_celltype_names:
-            col = f"count::{name}"
-            if col in ranked.columns:
-                total = total + pd.to_numeric(ranked[col], errors="coerce").fillna(0).to_numpy()
-        ranked["assigned_defined_total"] = total
-
-    ambiguous = (
-        pd.to_numeric(ranked["count::Ambiguous"], errors="coerce").fillna(np.inf)
-        if "count::Ambiguous" in ranked.columns
-        else pd.Series(np.zeros(len(ranked), dtype=float), index=ranked.index)
+    return _rank_celltype_assignment_results_by_unresolved(
+        df_results,
+        defined_celltype_names=defined_celltype_names,
     )
-    unassigned = (
-        pd.to_numeric(ranked["count::Unassigned"], errors="coerce").fillna(np.inf)
-        if "count::Unassigned" in ranked.columns
-        else pd.Series(np.zeros(len(ranked), dtype=float), index=ranked.index)
-    )
-    ranked["unresolved_total"] = ambiguous + unassigned
-
-    sort_cols = ["unresolved_total"]
-    ascending = [True]
-    if "count::Ambiguous" in ranked.columns:
-        sort_cols.append("count::Ambiguous")
-        ascending.append(True)
-    if "count::Unassigned" in ranked.columns:
-        sort_cols.append("count::Unassigned")
-        ascending.append(True)
-    if "assigned_defined_total" in ranked.columns:
-        sort_cols.append("assigned_defined_total")
-        ascending.append(False)
-    if "combo_index" in ranked.columns:
-        sort_cols.append("combo_index")
-        ascending.append(True)
-    return ranked.sort_values(sort_cols, ascending=ascending).reset_index(drop=True)
 
 
 def recommend_celltype_assignment_optimizer_result(
@@ -1850,6 +1874,30 @@ def recommend_celltype_assignment_optimizer_result(
     if len(ranked) == 0:
         return None
     return ranked.iloc[0]
+
+
+def celltype_assignment_recommendation_metrics(row: pd.Series | None) -> Dict[str, int]:
+    if row is None:
+        return {}
+    ambiguous = int(float(row.get("count::Ambiguous", 0)))
+    unassigned = int(float(row.get("count::Unassigned", 0)))
+    assigned = int(float(row.get("assigned_defined_total", 0)))
+    sampled_value = pd.to_numeric(
+        pd.Series([row.get("n_cells", np.nan)]), errors="coerce"
+    ).iloc[0]
+    sampled_cells = (
+        int(float(sampled_value))
+        if np.isfinite(sampled_value) and float(sampled_value) >= 0
+        else assigned + ambiguous + unassigned
+    )
+    return {
+        "combo_index": int(float(row.get("combo_index", 0))),
+        "ambiguous_cells": ambiguous,
+        "unassigned_cells": unassigned,
+        "unresolved_cells": ambiguous + unassigned,
+        "assigned_cells": assigned,
+        "sampled_cells": sampled_cells,
+    }
 
 
 def _assignment_decimal_places_from_step(step: float) -> int:

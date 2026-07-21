@@ -14,6 +14,7 @@ $TestsRoot = Join-Path $WindowsRoot "tests"
 $NativeRoot = Join-Path $WindowsRoot "native"
 $InstallerScript = Join-Path $WindowsRoot "installer\SpatialScope.nsi"
 $ProjectPath = Join-Path $NativeRoot "src\SpatialScope.App\SpatialScope.App.csproj"
+$AppContractTestProject = Join-Path $NativeRoot "tests\SpatialScope.App.ContractTests\SpatialScope.App.ContractTests.csproj"
 $UpdaterTestProject = Join-Path $NativeRoot "tests\SpatialScope.Updater.ContractTests\SpatialScope.Updater.ContractTests.csproj"
 $BuildRoot = Join-Path $WindowsRoot "build\native-release"
 $PyInstallerWork = Join-Path $BuildRoot "pyinstaller-work"
@@ -40,6 +41,32 @@ function Assert-ChildPath([string]$Candidate, [string]$ExpectedParent) {
     $ResolvedParent = [System.IO.Path]::GetFullPath($ExpectedParent).TrimEnd('\')
     if (-not $ResolvedCandidate.StartsWith("$ResolvedParent\", [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Refusing to modify a path outside $ResolvedParent`: $ResolvedCandidate"
+    }
+}
+
+function Stop-ProcessesAtExactPaths([string[]]$ExecutablePaths) {
+    $ExpectedPaths = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($ExecutablePath in $ExecutablePaths) {
+        if ($ExecutablePath) {
+            [void]$ExpectedPaths.Add([System.IO.Path]::GetFullPath($ExecutablePath))
+        }
+    }
+
+    foreach ($Process in Get-Process -ErrorAction SilentlyContinue) {
+        try {
+            $ProcessPath = $Process.Path
+            if ($ProcessPath -and $ExpectedPaths.Contains([System.IO.Path]::GetFullPath($ProcessPath))) {
+                Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+            }
+        }
+        catch {
+            # Access to unrelated system processes can be denied; exact-path
+            # cleanup remains best-effort and never targets a process by name.
+        }
+        finally {
+            $Process.Dispose()
+        }
     }
 }
 
@@ -96,6 +123,8 @@ try {
     Assert-Success "exact nuclei optimizer grouping tests"
     & $PythonExe -m unittest discover -s $TestsRoot -p "test_optimizer_fixed_parameters.py" -v
     Assert-Success "optimizer fixed-parameter contract tests"
+    & $PythonExe -m unittest discover -s $TestsRoot -p "test_celltype_optimizer_recommendation.py" -v
+    Assert-Success "cell-type optimizer recommendation objective tests"
     & $PythonExe -m unittest discover -s $TestsRoot -p "test_assignment_parameter_parity.py" -v
     Assert-Success "assignment parameter parity tests"
     & $PythonExe -m unittest discover -s $TestsRoot -p "test_celltype_vectorized_rules.py" -v
@@ -118,6 +147,8 @@ try {
     Assert-Success "source Matplotlib renderer smoke test"
     dotnet run --project $UpdaterTestProject --configuration Release
     Assert-Success "native updater contract tests"
+    dotnet run --project $AppContractTestProject --configuration Release
+    Assert-Success "native WPF live-preview contract tests"
     dotnet build $ProjectPath --configuration Release
     Assert-Success "native WPF build"
 
@@ -266,6 +297,8 @@ try {
         -not (Test-Path -LiteralPath $SmokeMarker)) {
         throw "The installer smoke test did not install the app, engine, and safety markers."
     }
+    Assert-ChildPath $InstalledApp $InstallerSmokeRoot
+    Assert-ChildPath $InstalledEngine $InstallerSmokeRoot
 
     # Exercise the updater handoff itself with the installed app as the real
     # blocker: NSIS must wait for its PID and named mutex, replace only the
@@ -277,6 +310,10 @@ try {
     $UpdatePreviousExitDelay = $env:SPATIALSCOPE_QA_EXIT_DELAY_MS
     $UpdateHadCheckSetting = Test-Path -LiteralPath Env:SPATIALSCOPE_DISABLE_UPDATE_CHECK
     $UpdatePreviousCheckSetting = $env:SPATIALSCOPE_DISABLE_UPDATE_CHECK
+    $HadQaMutexSetting = Test-Path -LiteralPath Env:SPATIALSCOPE_QA_INSTANCE_MUTEX
+    $PreviousQaMutexSetting = $env:SPATIALSCOPE_QA_INSTANCE_MUTEX
+    $SmokeInstanceMutexName = "Local\SpatialScope.Windows.Application.QA.$([Guid]::NewGuid().ToString('N'))"
+    $env:SPATIALSCOPE_QA_INSTANCE_MUTEX = $SmokeInstanceMutexName
     $PriorInstalledProcess = $null
     $DuplicateInstalledProcess = $null
     $UpdateInstallerProcess = $null
@@ -286,7 +323,11 @@ try {
         $env:SPATIALSCOPE_QA_EXIT_DELAY_MS = "5000"
         $env:SPATIALSCOPE_DISABLE_UPDATE_CHECK = "1"
         [System.IO.File]::WriteAllText($InstallMarker, "waiting for prior process", [System.Text.Encoding]::ASCII)
-        $PriorInstalledProcess = Start-Process -FilePath $InstalledApp -WindowStyle Hidden -PassThru
+        $PriorInstalledProcess = Start-Process `
+            -FilePath $InstalledApp `
+            -ArgumentList "--qa-smoke" `
+            -WindowStyle Hidden `
+            -PassThru
         $PreUpdateCaptureDeadline = [DateTime]::UtcNow.AddSeconds(30)
         while (-not (Test-Path -LiteralPath $PreUpdateCapturePath) -and
             -not $PriorInstalledProcess.HasExited -and
@@ -300,7 +341,11 @@ try {
         $DuplicateCapturePath = Join-Path $InstallerSmokeRoot "duplicate-app.png"
         $env:SPATIALSCOPE_CAPTURE_PATH = $DuplicateCapturePath
         $env:SPATIALSCOPE_QA_EXIT_DELAY_MS = "0"
-        $DuplicateInstalledProcess = Start-Process -FilePath $InstalledApp -WindowStyle Hidden -PassThru
+        $DuplicateInstalledProcess = Start-Process `
+            -FilePath $InstalledApp `
+            -ArgumentList "--qa-smoke" `
+            -WindowStyle Hidden `
+            -PassThru
         if (-not $DuplicateInstalledProcess.WaitForExit(5000)) {
             throw "A duplicate SpatialScope instance did not exit while the primary instance held the mutex."
         }
@@ -348,7 +393,7 @@ try {
         while ($MutexStillExists -and [DateTime]::UtcNow -lt $MutexExitDeadline) {
             $MutexProbe = $null
             try {
-                $MutexProbe = [System.Threading.Mutex]::OpenExisting("Local\SpatialScope.Windows.Application")
+                $MutexProbe = [System.Threading.Mutex]::OpenExisting($SmokeInstanceMutexName)
                 $MutexStillExists = $true
             }
             catch [System.Threading.WaitHandleCannotBeOpenedException] {
@@ -373,6 +418,7 @@ try {
         if ($UpdateInstallerProcess -and -not $UpdateInstallerProcess.HasExited) {
             Stop-Process -Id $UpdateInstallerProcess.Id -Force -ErrorAction SilentlyContinue
         }
+        Stop-ProcessesAtExactPaths @($InstalledApp, $InstalledEngine)
         $env:SPATIALSCOPE_CAPTURE_PATH = $UpdatePreviousCapturePath
         $env:SPATIALSCOPE_CAPTURE_EXIT = $UpdatePreviousCaptureExit
         $env:SPATIALSCOPE_QA_EXIT_DELAY_MS = $UpdatePreviousExitDelay
@@ -381,6 +427,11 @@ try {
         } else {
             Remove-Item -LiteralPath Env:SPATIALSCOPE_DISABLE_UPDATE_CHECK -ErrorAction SilentlyContinue
         }
+        if ($HadQaMutexSetting) {
+            $env:SPATIALSCOPE_QA_INSTANCE_MUTEX = $PreviousQaMutexSetting
+        } else {
+            Remove-Item -LiteralPath Env:SPATIALSCOPE_QA_INSTANCE_MUTEX -ErrorAction SilentlyContinue
+        }
     }
 
     $CapturePath = Join-Path $InstallerSmokeRoot "installed-app.png"
@@ -388,23 +439,38 @@ try {
     $PreviousCaptureExit = $env:SPATIALSCOPE_CAPTURE_EXIT
     $HadUpdateCheckSetting = Test-Path -LiteralPath Env:SPATIALSCOPE_DISABLE_UPDATE_CHECK
     $PreviousUpdateCheckSetting = $env:SPATIALSCOPE_DISABLE_UPDATE_CHECK
+    $InstalledProcess = $null
     try {
+        $env:SPATIALSCOPE_QA_INSTANCE_MUTEX = $SmokeInstanceMutexName
         $env:SPATIALSCOPE_CAPTURE_PATH = $CapturePath
         $env:SPATIALSCOPE_CAPTURE_EXIT = "1"
         $env:SPATIALSCOPE_DISABLE_UPDATE_CHECK = "1"
-        $InstalledProcess = Start-Process -FilePath $InstalledApp -WindowStyle Hidden -PassThru
+        $InstalledProcess = Start-Process `
+            -FilePath $InstalledApp `
+            -ArgumentList "--qa-smoke" `
+            -WindowStyle Hidden `
+            -PassThru
         if (-not $InstalledProcess.WaitForExit(30000)) {
             Stop-Process -Id $InstalledProcess.Id -Force -ErrorAction SilentlyContinue
             throw "The installed SpatialScope app did not finish its launch smoke test."
         }
     }
     finally {
+        if ($InstalledProcess -and -not $InstalledProcess.HasExited) {
+            Stop-Process -Id $InstalledProcess.Id -Force -ErrorAction SilentlyContinue
+        }
+        Stop-ProcessesAtExactPaths @($InstalledApp, $InstalledEngine)
         $env:SPATIALSCOPE_CAPTURE_PATH = $PreviousCapturePath
         $env:SPATIALSCOPE_CAPTURE_EXIT = $PreviousCaptureExit
         if ($HadUpdateCheckSetting) {
             $env:SPATIALSCOPE_DISABLE_UPDATE_CHECK = $PreviousUpdateCheckSetting
         } else {
             Remove-Item -LiteralPath Env:SPATIALSCOPE_DISABLE_UPDATE_CHECK -ErrorAction SilentlyContinue
+        }
+        if ($HadQaMutexSetting) {
+            $env:SPATIALSCOPE_QA_INSTANCE_MUTEX = $PreviousQaMutexSetting
+        } else {
+            Remove-Item -LiteralPath Env:SPATIALSCOPE_QA_INSTANCE_MUTEX -ErrorAction SilentlyContinue
         }
     }
     if (-not (Test-Path -LiteralPath $CapturePath)) {

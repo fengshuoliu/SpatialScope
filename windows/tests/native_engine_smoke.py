@@ -500,6 +500,26 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
         )
         if second_filtered_preview["previewPath"] == filtered_preview["previewPath"]:
             raise AssertionError("Distinct Region preview keys reused the same cache path.")
+        manual_editor_payload = {
+            **filtered_preview_payload,
+            "selectedCellTypes": [resolved_types[0]],
+            "previewKey": "manual_editor",
+            "boundaryCellTypeMode": "source",
+        }
+        first_manual_editor_preview = engine.request("region_preview", manual_editor_payload)
+        manual_editor_path = Path(first_manual_editor_preview["previewPath"])
+        first_manual_editor_bytes = manual_editor_path.read_bytes()
+        second_manual_editor_preview = engine.request(
+            "region_preview",
+            {**manual_editor_payload, "selectedCellTypes": [resolved_types[1]]},
+        )
+        second_manual_editor_path = Path(second_manual_editor_preview["previewPath"])
+        if second_manual_editor_path != manual_editor_path:
+            raise AssertionError("Manual editor selections did not reuse their stable preview path.")
+        if second_manual_editor_path.read_bytes() == first_manual_editor_bytes:
+            raise AssertionError(
+                "Manual editor preview pixels did not change after selecting a different displayed cell type."
+            )
         if json.loads(workflow_state_path.read_text(encoding="utf-8")) != state_before_region_preview:
             raise AssertionError("Read-only Region preview changed persisted workflow state.")
 
@@ -1452,10 +1472,49 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
                 assignment_recommendation = dict(assignment_apply_restore["assignmentRecommendation"])
                 applied_assignment_parameters = dict(assignment_apply_restore["assignmentParameters"])
                 applied_assignment_parameters.update(assignment_recommendation)
+                mismatched_parameters = dict(applied_assignment_parameters)
+                mismatched_parameters["min_pos_pix"] = int(mismatched_parameters["min_pos_pix"]) + 1
+                try:
+                    assignment_apply_engine.request(
+                        "apply_recommendation",
+                        {
+                            "kind": "assignment",
+                            "parameters": mismatched_parameters,
+                            "recommendationId": assignment_apply_restore.get("assignmentRecommendationId"),
+                        },
+                    )
+                except RuntimeError as error:
+                    if "do not match" not in str(error):
+                        raise AssertionError(f"Mismatched recommendation failed for the wrong reason: {error}") from error
+                else:
+                    raise AssertionError("The engine accepted assignment parameters that differed from the recommendation.")
+                try:
+                    assignment_apply_engine.request(
+                        "apply_recommendation",
+                        {
+                            "kind": "assignment",
+                            "parameters": applied_assignment_parameters,
+                            "recommendationId": "0" * 64,
+                        },
+                    )
+                except RuntimeError as error:
+                    if "recommendation changed" not in str(error).lower():
+                        raise AssertionError(f"Stale recommendation ID failed for the wrong reason: {error}") from error
+                else:
+                    raise AssertionError("The engine accepted a stale assignment recommendation ID.")
                 applied_assignment = assignment_apply_engine.request(
                     "apply_recommendation",
-                    {"kind": "assignment", "parameters": applied_assignment_parameters},
+                    {
+                        "kind": "assignment",
+                        "parameters": applied_assignment_parameters,
+                        "recommendationId": assignment_apply_restore.get("assignmentRecommendationId"),
+                    },
                 )
+                if applied_assignment.get("parameters") != applied_assignment_parameters:
+                    raise AssertionError(
+                        "The engine did not return the canonical assignment recommendation: "
+                        f"{applied_assignment}"
+                    )
                 if any(
                     bool(applied_assignment["workflow"].get(stage)) != (stage in {"inputs", "overlay", "nuclei"})
                     for stage in applied_assignment["workflow"]
@@ -1488,6 +1547,39 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
                     raise AssertionError("Applied assignment parameters lost the saved cell type definitions.")
                 if assignment_applied_restore.get("resolvedCellTypes") or assignment_applied_restore.get("boundaries"):
                     raise AssertionError("Applied assignment parameters exposed stale assignment-derived results.")
+
+                final_from_applied = assignment_apply_restore_engine.request(
+                    "celltype_assignment",
+                    {
+                        "nucleusChannel": "DAPI",
+                        "cellTypes": assignment_applied_restore["cellTypes"],
+                        # Mirror the WPF final-run request: after Apply, the UI
+                        # sends the canonical values currently shown in its
+                        # editable final-parameter controls.
+                        "parameters": assignment_applied_restore["assignmentParameters"],
+                    },
+                )
+                if final_from_applied.get("parameters") != applied_assignment_parameters:
+                    raise AssertionError(
+                        "Final assignment did not consume the applied recommendation: "
+                        f"actual={final_from_applied.get('parameters')}, expected={applied_assignment_parameters}"
+                    )
+                assignment_output = assignment_apply_output / "05_cell_type_assignment"
+                for filename in (
+                    "celltype_assignment_params.json",
+                    "celltype_assignment_parameters.json",
+                ):
+                    saved_parameters = json.loads((assignment_output / filename).read_text(encoding="utf-8"))
+                    if saved_parameters != applied_assignment_parameters:
+                        raise AssertionError(
+                            f"{filename} did not save the applied recommendation: "
+                            f"actual={saved_parameters}, expected={applied_assignment_parameters}"
+                        )
+                final_state = json.loads(
+                    (assignment_apply_output / "00_config" / "windows_session_state.json").read_text(encoding="utf-8")
+                )
+                if final_state.get("pendingParameters", {}).get("assignment"):
+                    raise AssertionError("Final assignment did not clear the consumed applied recommendation.")
             finally:
                 assignment_apply_restore_engine.close()
 
@@ -1576,7 +1668,7 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
             "optimizer_checks": 5,
             "region_protocol_checks": 12,
             "restore_checks": 16,
-            "apply_checks": 2,
+            "apply_checks": 5,
             "output_guard_checks": 2,
             "output_files": len(outputs["files"]),
             "max_protocol_line_bytes": engine.max_protocol_line_bytes,

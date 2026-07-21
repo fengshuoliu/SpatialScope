@@ -54,13 +54,16 @@ from cell_distribution_export import (  # noqa: E402
     run_region_mask_band_analysis,
 )
 from src.spatialscope_analysis.celltype_assignment import (  # noqa: E402
+    CELLTYPE_OPTIMIZER_PARAM_ORDER,
     CELLTYPE_OPTIMIZER_PARAM_LABELS,
     COLOR_HEX_LIST,
     CelltypeAssignmentParams,
+    celltype_assignment_recommendation_metrics,
     recommend_celltype_assignment_optimizer_result,
     run_celltype_assignment,
     run_celltype_assignment_parameter_optimizer,
     save_celltype_config,
+    validate_celltype_config_names,
 )
 from src.spatialscope_analysis.compute_runtime import (  # noqa: E402
     ComputeRuntime,
@@ -115,7 +118,7 @@ from src.spatialscope_analysis.visualization import (  # noqa: E402
 
 
 PROTOCOL_VERSION = 1
-ENGINE_VERSION = "1.2.5"
+ENGINE_VERSION = "1.2.6"
 PROTOCOL_STDOUT = sys.stdout
 
 REGION_CONTOUR_DOWNSAMPLES = (1, 2, 4, 8)
@@ -166,6 +169,109 @@ ASSIGNMENT_OPTIMIZER_SEARCH_SPECS: Dict[str, Dict[str, Any]] = {
     "ambiguous_min_probability": {"kind": "float", "min": 0.01, "max": 1.0, "step": 0.01},
     "ambiguous_min_gap": {"kind": "float", "min": 0.0, "max": 1.0, "step": 0.01},
 }
+
+ASSIGNMENT_PARAMETER_LIMITS: Dict[str, tuple[float, float]] = {
+    "r_voronoi_um": (0.0, 300.0),
+    "r_buffer_um": (0.0, 300.0),
+    "r_vote_um": (0.0, 300.0),
+    "tophat_r_um": (0.0, 150.0),
+    "gauss_sigma_um": (0.0, 75.0),
+    "min_pos_object_size_px": (0.0, 200.0),
+    "min_pos_pix": (0.0, 200.0),
+    "ambiguous_min_probability": (0.0, 1.0),
+    "ambiguous_min_gap": (0.0, 1.0),
+}
+ASSIGNMENT_INTEGER_PARAMETERS = frozenset({"min_pos_object_size_px", "min_pos_pix"})
+ASSIGNMENT_THRESHOLD_MODES = frozenset({"global_otsu", "local", "yen", "triangle"})
+
+
+def _normalize_assignment_parameters(
+    raw: Any,
+    *,
+    defaults: Dict[str, Any] | None = None,
+    require_complete: bool = True,
+) -> Dict[str, Any]:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise ValueError("Assignment parameters must be an object.")
+
+    allowed = set(CELLTYPE_OPTIMIZER_PARAM_ORDER)
+    unknown = sorted(str(key) for key in raw if str(key) not in allowed)
+    if unknown:
+        raise ValueError(f"Unknown assignment parameters: {', '.join(unknown)}")
+
+    merged = dict(defaults or {})
+    merged.update({str(key): value for key, value in raw.items()})
+    missing = [key for key in CELLTYPE_OPTIMIZER_PARAM_ORDER if key not in merged]
+    if require_complete and missing:
+        raise ValueError(f"Missing assignment parameters: {', '.join(missing)}")
+
+    normalized: Dict[str, Any] = {}
+    for key in CELLTYPE_OPTIMIZER_PARAM_ORDER:
+        if key not in merged:
+            continue
+        value = merged[key]
+        if key == "thresh_mode":
+            if not isinstance(value, str) or value not in ASSIGNMENT_THRESHOLD_MODES:
+                raise ValueError(
+                    "Assignment thresh_mode must be one of: "
+                    + ", ".join(sorted(ASSIGNMENT_THRESHOLD_MODES))
+                )
+            normalized[key] = value
+            continue
+        if key == "resolve_ambiguous":
+            if not isinstance(value, bool):
+                raise ValueError("Assignment resolve_ambiguous must be a Boolean.")
+            normalized[key] = value
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
+            raise ValueError(f"Assignment parameter {key} must be numeric.")
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            raise ValueError(f"Assignment parameter {key} must be finite.")
+        minimum, maximum = ASSIGNMENT_PARAMETER_LIMITS[key]
+        if numeric < minimum or numeric > maximum:
+            raise ValueError(
+                f"Assignment parameter {key} must be between {minimum:g} and {maximum:g}."
+            )
+        if key in ASSIGNMENT_INTEGER_PARAMETERS:
+            if not numeric.is_integer():
+                raise ValueError(f"Assignment parameter {key} must be an integer.")
+            normalized[key] = int(numeric)
+        else:
+            normalized[key] = numeric
+    return normalized
+
+
+def _assignment_recommendation_id(parameters: Dict[str, Any]) -> str:
+    encoded = json.dumps(
+        parameters,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _public_assignment_recommendation_metrics(
+    row: pd.Series | None,
+    *,
+    evaluated_combinations: int,
+) -> Dict[str, int]:
+    metrics = celltype_assignment_recommendation_metrics(row)
+    if not metrics:
+        return {}
+    return {
+        "comboIndex": int(metrics["combo_index"]),
+        "ambiguousCells": int(metrics["ambiguous_cells"]),
+        "unassignedCells": int(metrics["unassigned_cells"]),
+        "unresolvedCells": int(metrics["unresolved_cells"]),
+        "assignedCells": int(metrics["assigned_cells"]),
+        "sampledCells": int(metrics["sampled_cells"]),
+        "evaluatedCombinations": int(evaluated_combinations),
+    }
 
 
 def _cpu_budget(payload: Dict[str, Any], key: str = "cpuWorkers", maximum: int | None = None) -> int:
@@ -1222,11 +1328,9 @@ class NativeEngine:
                     value = json.loads(definition_path.read_text(encoding="utf-8"))
                     records = value.get("cell_types", []) if isinstance(value, dict) else value
                     if isinstance(records, list):
-                        self.celltype_config = [
-                            self._normalize_celltype(item, index)
-                            for index, item in enumerate(records)
-                            if isinstance(item, dict)
-                        ]
+                        self.celltype_config = self._normalize_celltypes(
+                            [item for item in records if isinstance(item, dict)]
+                        )
                         break
                 except Exception as error:
                     warnings.append(f"Could not restore saved cell type definitions: {error}")
@@ -1308,6 +1412,26 @@ class NativeEngine:
             if recommendation_allowed("assignment")
             else {}
         )
+        assignment_recommendation_metrics = (
+            self._load_assignment_recommendation_metrics(
+                assignment_optimizer_dir / "celltype_assignment_native_optimizer_recommendation_metrics.json",
+                assignment_optimizer_dir / "celltype_assignment_native_optimizer_results.csv",
+            )
+            if assignment_recommendation
+            else {}
+        )
+        assignment_recommendation_id: str | None = None
+        if assignment_recommendation:
+            try:
+                assignment_recommendation = _normalize_assignment_parameters(
+                    assignment_recommendation,
+                    require_complete=True,
+                )
+                assignment_recommendation_id = _assignment_recommendation_id(assignment_recommendation)
+            except Exception as error:
+                warnings.append(f"Could not restore saved assignment recommendation: {error}")
+                assignment_recommendation = {}
+                assignment_recommendation_metrics = {}
 
         overlay_complete = stage_allowed("overlay") and all(
             (overlay_dir / name).is_file() for name in ("overlay_preview.png", "split_channels_preview.png")
@@ -1461,6 +1585,8 @@ class NativeEngine:
             "assignmentParameters": self.pending_parameters["assignment"] or assignment_params,
             "nucleiRecommendation": nuclei_recommendation,
             "assignmentRecommendation": assignment_recommendation,
+            "assignmentRecommendationMetrics": assignment_recommendation_metrics,
+            "assignmentRecommendationId": assignment_recommendation_id,
             "cellTypes": self.celltype_config,
             "resolvedCellTypes": resolved_cell_types,
             "regions": regions,
@@ -1688,7 +1814,7 @@ class NativeEngine:
                 for index, marker in enumerate(marker_names)
                 if marker != str(payload.get("nucleusChannel") or self.nuclei_result["params"]["NUCLEUS_CHANNEL"])
             ]
-        normalized_definitions = [self._normalize_celltype(item, index) for index, item in enumerate(definitions)]
+        normalized_definitions = self._normalize_celltypes(definitions)
         preserve_current = "assignment" if normalized_definitions == self.celltype_config else None
         self._invalidate_workflow_from("cellTypes", preserve_current=preserve_current)
         self.celltype_config = normalized_definitions
@@ -1697,20 +1823,20 @@ class NativeEngine:
         # Canonical wrapper used by native and smoke workflows.
         write_json(definition_dir / "celltype_config.json", {"cell_types": self.celltype_config})
 
-        raw = payload.get("parameters") or {}
-        params = CelltypeAssignmentParams(
-            r_voronoi_um=float(raw.get("r_voronoi_um", 3.0)),
-            r_buffer_um=float(raw.get("r_buffer_um", 2.0)),
-            r_vote_um=float(raw.get("r_vote_um", 3.0)),
-            tophat_r_um=float(raw.get("tophat_r_um", 1.0)),
-            gauss_sigma_um=float(raw.get("gauss_sigma_um", 0.5)),
-            thresh_mode=str(raw.get("thresh_mode", "global_otsu")),
-            min_pos_object_size_px=int(raw.get("min_pos_object_size_px", 9)),
-            min_pos_pix=int(raw.get("min_pos_pix", 5)),
-            resolve_ambiguous=bool(raw.get("resolve_ambiguous", True)),
-            ambiguous_min_probability=float(raw.get("ambiguous_min_probability", 0.60)),
-            ambiguous_min_gap=float(raw.get("ambiguous_min_gap", 0.10)),
+        # An applied recommendation seeds the final-run panel. Explicit
+        # parameters are the current WPF values and may intentionally differ
+        # when the user edits a field after applying the suggestion.
+        parameter_defaults = (
+            dict(self.pending_parameters["assignment"])
+            if self.pending_parameters["assignment"]
+            else CelltypeAssignmentParams().to_dict()
         )
+        normalized_parameters = _normalize_assignment_parameters(
+            payload.get("parameters"),
+            defaults=parameter_defaults,
+            require_complete=True,
+        )
+        params = CelltypeAssignmentParams(**normalized_parameters)
         _progress(request_id, 0.12, "Saving cell type definitions")
         output_dir = _section_dir(config, "celltype_assignment")
         self.assignment_result = run_celltype_assignment(
@@ -1762,29 +1888,19 @@ class NativeEngine:
         definitions = payload.get("cellTypes") or payload.get("celltypeConfig") or []
         if not definitions:
             raise ValueError("Define at least one cell type before assignment parameter optimization.")
-        normalized_definitions = [
-            self._normalize_celltype(item, index)
-            for index, item in enumerate(definitions)
-        ]
+        normalized_definitions = self._normalize_celltypes(definitions)
         if normalized_definitions != self.celltype_config:
             self._invalidate_workflow_from("cellTypes")
         self.celltype_config = normalized_definitions
         definition_dir = _section_dir(config, "celltype_definition")
         write_json(definition_dir / "celltype_config.json", {"cell_types": self.celltype_config})
 
-        raw = payload.get("parameters") or {}
         base_params = CelltypeAssignmentParams(
-            r_voronoi_um=float(raw.get("r_voronoi_um", 3.0)),
-            r_buffer_um=float(raw.get("r_buffer_um", 2.0)),
-            r_vote_um=float(raw.get("r_vote_um", 3.0)),
-            tophat_r_um=float(raw.get("tophat_r_um", 1.0)),
-            gauss_sigma_um=float(raw.get("gauss_sigma_um", 0.5)),
-            thresh_mode=str(raw.get("thresh_mode", "global_otsu")),
-            min_pos_object_size_px=int(raw.get("min_pos_object_size_px", 9)),
-            min_pos_pix=int(raw.get("min_pos_pix", 5)),
-            resolve_ambiguous=bool(raw.get("resolve_ambiguous", True)),
-            ambiguous_min_probability=float(raw.get("ambiguous_min_probability", 0.60)),
-            ambiguous_min_gap=float(raw.get("ambiguous_min_gap", 0.10)),
+            **_normalize_assignment_parameters(
+                payload.get("parameters"),
+                defaults=CelltypeAssignmentParams().to_dict(),
+                require_complete=True,
+            )
         )
         search_specs = payload.get("searchSpecs") or copy.deepcopy(ASSIGNMENT_OPTIMIZER_SEARCH_SPECS)
         fixed_search = apply_assignment_fixed_parameter_keys(
@@ -1796,6 +1912,12 @@ class NativeEngine:
         max_evaluations = max(1, min(int(payload.get("maxEvaluations", 64)), 4096))
         _progress(request_id, 0.05, f"Screening up to {max_evaluations} assignment parameter combinations")
         output_dir = _section_dir(config, "celltype_assignment_parameters")
+
+        # Gate recommendation restore with persisted state. If this rerun is
+        # interrupted while replacing its CSV/JSON artifacts, restart must not
+        # expose the previous recommendation or a half-written new bundle.
+        self.recommendation_state["assignment"] = False
+        self._persist_workflow_state()
         result = run_celltype_assignment_parameter_optimizer(
             folder=Path(config.folder),
             save_dir=output_dir,
@@ -1837,7 +1959,22 @@ class NativeEngine:
                 column = CELLTYPE_OPTIMIZER_PARAM_LABELS.get(key, key)
                 if column in recommended_row:
                     recommended[key] = _json_scalar(recommended_row[column])
+        if recommended:
+            recommended = _normalize_assignment_parameters(
+                recommended,
+                require_complete=True,
+            )
+        evaluated = int(result.get("evaluated_unique_combinations", len(result.get("results", []))))
+        recommendation_metrics = _public_assignment_recommendation_metrics(
+            recommended_row,
+            evaluated_combinations=evaluated,
+        )
+        recommendation_id = _assignment_recommendation_id(recommended) if recommended else None
         write_json(output_dir / "celltype_assignment_native_optimizer_recommendation.json", recommended)
+        write_json(
+            output_dir / "celltype_assignment_native_optimizer_recommendation_metrics.json",
+            recommendation_metrics,
+        )
         write_json(
             output_dir / "celltype_assignment_native_optimizer_fixed_parameters.json",
             {
@@ -1846,14 +1983,18 @@ class NativeEngine:
             },
         )
         preview_path = self._save_first_result_figure_preview(result, output_dir / "celltype_assignment_optimizer_preview.png")
-        evaluated = int(result.get("evaluated_unique_combinations", len(result.get("results", []))))
         _close_figures(result)
         self.recommendation_state["assignment"] = bool(recommended)
         self._persist_workflow_state()
         _progress(request_id, 1.0, "Assignment parameter optimization complete")
         return {
-            "summary": {"evaluatedCombinations": evaluated},
+            "summary": {
+                "evaluatedCombinations": evaluated,
+                "recommendation": recommendation_metrics,
+            },
             "recommendedParameters": recommended,
+            "recommendationMetrics": recommendation_metrics,
+            "recommendationId": recommendation_id,
             "fixedParameterKeys": list(fixed_search.fixed_parameter_keys),
             "fixedParameters": dict(fixed_search.fixed_parameters),
             "previewPath": str(preview_path) if preview_path else None,
@@ -3525,22 +3666,51 @@ class NativeEngine:
         }
 
     def apply_recommendation(self, _request_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        self._require_config()
+        config = self._require_config()
         kind = str(payload.get("kind") or "").strip()
         if kind not in {"nuclei", "assignment"}:
             raise ValueError("Recommendation kind must be 'nuclei' or 'assignment'.")
-        raw_parameters = payload.get("parameters")
-        if not isinstance(raw_parameters, dict):
-            raise ValueError("Applied recommendation parameters are required.")
-        parameters = {
-            str(key): _json_scalar(value)
-            for key, value in raw_parameters.items()
-            if isinstance(value, (str, int, float, bool)) or value is None
-        }
-        if not parameters:
-            raise ValueError("Applied recommendation parameters are empty.")
         if not self.recommendation_state.get(kind, False):
             raise RuntimeError(f"No pending {kind} recommendation is available to apply.")
+
+        recommendation_id: str | None = None
+        raw_parameters = payload.get("parameters")
+        if kind == "assignment":
+            optimizer_dir = _section_dir(config, "celltype_assignment_parameters")
+            canonical = self._load_optimizer_recommendation(
+                optimizer_dir / "celltype_assignment_native_optimizer_recommendation.json",
+                optimizer_dir / "celltype_assignment_native_optimizer_results.csv",
+                "assignment",
+            )
+            if not canonical:
+                raise RuntimeError("The pending assignment recommendation could not be loaded.")
+            parameters = _normalize_assignment_parameters(canonical, require_complete=True)
+            recommendation_id = _assignment_recommendation_id(parameters)
+            requested_id = payload.get("recommendationId")
+            if requested_id is not None and (
+                not isinstance(requested_id, str)
+                or requested_id != recommendation_id
+            ):
+                raise RuntimeError("The assignment recommendation changed. Run parameter screening again.")
+            if raw_parameters is not None:
+                requested_parameters = _normalize_assignment_parameters(
+                    raw_parameters,
+                    require_complete=True,
+                )
+                if requested_parameters != parameters:
+                    raise RuntimeError(
+                        "Applied assignment parameters do not match the optimizer's current recommendation."
+                    )
+        else:
+            if not isinstance(raw_parameters, dict):
+                raise ValueError("Applied recommendation parameters are required.")
+            parameters = {
+                str(key): _json_scalar(value)
+                for key, value in raw_parameters.items()
+                if isinstance(value, (str, int, float, bool)) or value is None
+            }
+            if not parameters:
+                raise ValueError("Applied recommendation parameters are empty.")
 
         stage = "nuclei" if kind == "nuclei" else "cellTypes"
         snapshot = {
@@ -3577,6 +3747,7 @@ class NativeEngine:
             "applied": True,
             "kind": kind,
             "parameters": parameters,
+            "recommendationId": recommendation_id,
             "workflow": dict(self.workflow_state),
         }
 
@@ -3642,6 +3813,39 @@ class NativeEngine:
         except Exception:
             return {}
 
+    def _load_assignment_recommendation_metrics(self, json_path: Path, csv_path: Path) -> Dict[str, int]:
+        if json_path.is_file():
+            try:
+                value = json.loads(json_path.read_text(encoding="utf-8"))
+                if isinstance(value, dict):
+                    required = {
+                        "comboIndex",
+                        "ambiguousCells",
+                        "unassignedCells",
+                        "unresolvedCells",
+                        "assignedCells",
+                        "sampledCells",
+                        "evaluatedCombinations",
+                    }
+                    if required.issubset(value):
+                        return {key: int(value[key]) for key in required}
+            except Exception:
+                pass
+        if not csv_path.is_file():
+            return {}
+        try:
+            results = pd.read_csv(csv_path)
+            row = recommend_celltype_assignment_optimizer_result(
+                results,
+                defined_celltype_names=[str(item["name"]) for item in self.celltype_config],
+            )
+            return _public_assignment_recommendation_metrics(
+                row,
+                evaluated_combinations=len(results),
+            )
+        except Exception:
+            return {}
+
     def _require_config(self) -> PipelineConfig:
         if self.config is None:
             raise RuntimeError("Save the input configuration first.")
@@ -3661,8 +3865,9 @@ class NativeEngine:
 
     @staticmethod
     def _normalize_celltype(item: Dict[str, Any], index: int) -> Dict[str, Any]:
+        name = str(item.get("name") or "").strip() or f"Cell type {index + 1}"
         return {
-            "name": str(item.get("name") or f"Cell type {index + 1}"),
+            "name": name,
             "color_hex": str(item.get("color_hex") or item.get("colorHex") or COLOR_HEX_LIST[index % len(COLOR_HEX_LIST)]),
             "mode": str(item.get("mode") or "simple"),
             "all_pos": [
@@ -3689,6 +3894,18 @@ class NativeEngine:
                 if isinstance(group, (list, tuple))
             ],
         }
+
+    @classmethod
+    def _normalize_celltypes(cls, definitions: Sequence[Dict[str, Any]]) -> list[Dict[str, Any]]:
+        normalized = [
+            cls._normalize_celltype(item, index)
+            for index, item in enumerate(definitions)
+            if isinstance(item, dict)
+        ]
+        if not normalized:
+            raise ValueError("Define at least one valid cell type.")
+        validate_celltype_config_names(normalized)
+        return normalized
 
     @staticmethod
     def _save_first_result_figure_preview(result: Dict[str, Any], path: Path) -> Path | None:

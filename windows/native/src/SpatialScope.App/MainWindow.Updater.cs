@@ -20,7 +20,7 @@ public partial class MainWindow
     private bool _updateInstallInProgress;
 
     private static Version GetCurrentApplicationVersion() =>
-        Assembly.GetExecutingAssembly().GetName().Version ?? new Version(1, 2, 5, 0);
+        Assembly.GetExecutingAssembly().GetName().Version ?? new Version(1, 2, 6, 0);
 
     private void BeginAutomaticUpdateCheck()
     {
