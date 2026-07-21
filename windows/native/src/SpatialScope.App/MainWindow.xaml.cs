@@ -157,6 +157,8 @@ public partial class MainWindow : Window
     private ParameterRunMode _assignmentRunMode = ParameterRunMode.Manual;
     private JsonElement? _pendingNucleiRecommendation;
     private JsonElement? _pendingAssignmentRecommendation;
+    private JsonElement? _pendingAssignmentRecommendationMetrics;
+    private string? _pendingAssignmentRecommendationId;
     private bool _closeInProgress;
     private bool _engineShutdownComplete;
     private int _outputRestoreGeneration;
@@ -736,11 +738,18 @@ public partial class MainWindow : Window
         };
     }
 
+    private void ClearPendingAssignmentRecommendation()
+    {
+        _pendingAssignmentRecommendation = null;
+        _pendingAssignmentRecommendationMetrics = null;
+        _pendingAssignmentRecommendationId = null;
+    }
+
     private void ClearPendingOptimizerResult(string kind)
     {
         var previewKey = kind == "nuclei" ? "nucleiOptimizer" : "assignmentOptimizer";
         if (kind == "nuclei") _pendingNucleiRecommendation = null;
-        else _pendingAssignmentRecommendation = null;
+        else ClearPendingAssignmentRecommendation();
         _previewPaths.Remove(previewKey);
         HideTaggedDetailElement($"preview:{previewKey}");
         HideTaggedDetailElement($"recommendation:{kind}");
@@ -778,14 +787,14 @@ public partial class MainWindow : Window
         {
             foreach (var channel in _channels) channel.Marker = Path.GetFileNameWithoutExtension(channel.FileName);
             _pendingNucleiRecommendation = null;
-            _pendingAssignmentRecommendation = null;
+            ClearPendingAssignmentRecommendation();
             InvalidateAfter("inputs");
         }));
         tools.Children.Add(CreateButton(_localization["ReassignColors"], (_, _) =>
         {
             for (var index = 0; index < _channels.Count; index++) _channels[index].ColorHex = ChannelPalette[index % ChannelPalette.Length];
             _pendingNucleiRecommendation = null;
-            _pendingAssignmentRecommendation = null;
+            ClearPendingAssignmentRecommendation();
             InvalidateAfter("inputs");
         }));
         tools.Children.Add(CreateButton(_localization["SaveConfiguration"], async (_, _) => await SaveConfigurationAsync(), primary: true));
@@ -795,7 +804,7 @@ public partial class MainWindow : Window
         {
             if (eventArgs.EditAction != DataGridEditAction.Commit) return;
             _pendingNucleiRecommendation = null;
-            _pendingAssignmentRecommendation = null;
+            ClearPendingAssignmentRecommendation();
             InvalidateAfter("inputs");
         };
         channelGrid.Columns.Add(new DataGridCheckBoxColumn { Header = _localization["Overlay"], Binding = new Binding(nameof(ChannelRow.IncludeInOverlay)), Width = 80 });
@@ -866,12 +875,12 @@ public partial class MainWindow : Window
                 case ChannelRow channel:
                     channel.ColorHex = selectedHex;
                     _pendingNucleiRecommendation = null;
-                    _pendingAssignmentRecommendation = null;
+                    ClearPendingAssignmentRecommendation();
                     InvalidateAfter("inputs");
                     break;
                 case CellTypeRow cellType:
                     cellType.ColorHex = selectedHex;
-                    _pendingAssignmentRecommendation = null;
+                    ClearPendingAssignmentRecommendation();
                     InvalidateAfter("cellTypes");
                     break;
             }
@@ -971,7 +980,7 @@ public partial class MainWindow : Window
         if (selected is null) return;
         _inputFolder = selected;
         _pendingNucleiRecommendation = null;
-        _pendingAssignmentRecommendation = null;
+        ClearPendingAssignmentRecommendation();
         InvalidateAfter("inputs");
         RefreshSectionViewIfSelected("inputs");
     }
@@ -1151,6 +1160,15 @@ public partial class MainWindow : Window
             && assignmentRecommendation.EnumerateObject().Any()
                 ? assignmentRecommendation.Clone()
                 : null;
+        _pendingAssignmentRecommendationMetrics = response.TryGetProperty("assignmentRecommendationMetrics", out var assignmentMetrics)
+            && assignmentMetrics.ValueKind == JsonValueKind.Object
+                ? assignmentMetrics.Clone()
+                : null;
+        _pendingAssignmentRecommendationId = response.TryGetProperty("assignmentRecommendationId", out var assignmentRecommendationId)
+            && assignmentRecommendationId.ValueKind == JsonValueKind.String
+                ? assignmentRecommendationId.GetString()
+                : null;
+        if (_pendingAssignmentRecommendation is null) ClearPendingAssignmentRecommendation();
 
         _previewPaths.Clear();
         if (response.TryGetProperty("previewPaths", out var previewPaths))
@@ -1379,7 +1397,7 @@ public partial class MainWindow : Window
         _resolvedCellTypes.Clear();
         _boundaries.Clear();
         _pendingNucleiRecommendation = null;
-        _pendingAssignmentRecommendation = null;
+        ClearPendingAssignmentRecommendation();
         _neighborhoodGridSize = 20;
         _regionSelectedCellTypes.Clear();
         _regionSelectionInitialized = false;
@@ -1786,7 +1804,7 @@ public partial class MainWindow : Window
             if (string.Equals(selected, _nucleusChannel, StringComparison.Ordinal)) return;
             _nucleusChannel = selected;
             _pendingNucleiRecommendation = null;
-            _pendingAssignmentRecommendation = null;
+            ClearPendingAssignmentRecommendation();
             InvalidateAfter("nuclei");
         };
         Grid.SetColumn(channelPicker, 1);
@@ -1879,8 +1897,9 @@ public partial class MainWindow : Window
                     if (property.Value.ValueKind == JsonValueKind.Number && !IsNucleiParameterFixed(property.Name))
                         appliedParameters[property.Name] = property.Value.GetDouble();
                 }
-                if (!await PersistAppliedRecommendationAsync("nuclei", appliedParameters)) return;
-                ApplyNucleiRecommendation(nucleiRecommendation);
+                var canonicalParameters = await PersistAppliedRecommendationAsync("nuclei", appliedParameters);
+                if (canonicalParameters is not JsonElement appliedRecommendation) return;
+                ApplyNucleiRecommendation(appliedRecommendation);
                 _pendingNucleiRecommendation = null;
                 SetLocalizedStatus("SuggestedComboApplied");
                 RefreshSectionViewIfSelected("nuclei");
@@ -1973,7 +1992,7 @@ public partial class MainWindow : Window
             DockPanel.SetDock(unit, Dock.Right);
             editorRow.Children.Add(unit);
         }
-        var editor = new TextBox { Text = values[parameter.Key].ToString("0.###", CultureInfo.CurrentCulture), FontFamily = new FontFamily("Cascadia Mono, Consolas") };
+        var editor = new TextBox { Text = values[parameter.Key].ToString("R", CultureInfo.CurrentCulture), FontFamily = new FontFamily("Cascadia Mono, Consolas") };
         AutomationProperties.SetName(editor, name);
         AutomationProperties.SetHelpText(editor, $"{parameter.Minimum:0.###}–{parameter.Maximum:0.###} {parameter.Unit}".Trim());
         editor.LostFocus += (_, _) =>
@@ -1981,13 +2000,13 @@ public partial class MainWindow : Window
             if (TryReadDouble(editor.Text, out var parsed))
             {
                 var normalized = Math.Clamp(parsed, parameter.Minimum, parameter.Maximum);
-                editor.Text = normalized.ToString("0.###", CultureInfo.CurrentCulture);
+                editor.Text = normalized.ToString("R", CultureInfo.CurrentCulture);
                 if (AreClose(normalized, values[parameter.Key])) return;
 
                 values[parameter.Key] = normalized;
                 if (ReferenceEquals(values, _assignmentValues))
                 {
-                    _pendingAssignmentRecommendation = null;
+                    ClearPendingAssignmentRecommendation();
                     InvalidateAfter("cellTypes");
                 }
                 else
@@ -1996,7 +2015,7 @@ public partial class MainWindow : Window
                     InvalidateAfter("nuclei");
                 }
             }
-            else editor.Text = values[parameter.Key].ToString("0.###", CultureInfo.CurrentCulture);
+            else editor.Text = values[parameter.Key].ToString("R", CultureInfo.CurrentCulture);
         };
         editor.ToolTip = $"{parameter.Minimum:0.###}–{parameter.Maximum:0.###}";
         editorRow.Children.Add(editor);
@@ -2263,6 +2282,7 @@ public partial class MainWindow : Window
             normalize: value => Math.Clamp(Math.Round(value), 1, 4096)));
         var optimize = CreateButton(_localization["RunAssignmentOptimizer"], async (_, _) =>
         {
+            ClearPendingOptimizerResult("assignment");
             var result = await RunWorkflowAsync("cellTypes", "celltype_optimizer", new
             {
                 cellTypes = BuildCellTypePayload(),
@@ -2279,6 +2299,15 @@ public partial class MainWindow : Window
             }, completesSection: false);
             if (result is null) return;
             _pendingAssignmentRecommendation = ExtractRecommendation(result.Value);
+            _pendingAssignmentRecommendationMetrics = result.Value.TryGetProperty("recommendationMetrics", out var metrics)
+                && metrics.ValueKind == JsonValueKind.Object
+                    ? metrics.Clone()
+                    : null;
+            _pendingAssignmentRecommendationId = result.Value.TryGetProperty("recommendationId", out var recommendationId)
+                && recommendationId.ValueKind == JsonValueKind.String
+                    ? recommendationId.GetString()
+                    : null;
+            if (_pendingAssignmentRecommendation is null) ClearPendingAssignmentRecommendation();
             _previewPaths["assignmentOptimizer"] = result.Value.TryGetProperty("previewPath", out var preview) && preview.ValueKind == JsonValueKind.String ? preview.GetString() ?? string.Empty : string.Empty;
             CaptureExportPaths(result.Value);
             RefreshSectionViewIfSelected("cellTypes");
@@ -2292,10 +2321,15 @@ public partial class MainWindow : Window
         {
             assignmentRecommendationPanel = new StackPanel { Tag = "recommendation:assignment" };
             assignmentRecommendationPanel.Children.Add(CreateSupportingText(_localization["SuggestedComboReady"], new Thickness(0, 12, 0, 8)));
+            assignmentRecommendationPanel.Children.Add(CreateAssignmentRecommendationReview(
+                assignmentRecommendation,
+                _pendingAssignmentRecommendationMetrics));
+            var capturedRecommendationId = _pendingAssignmentRecommendationId;
             var applySuggestion = CreateButton(_localization["ApplySuggestedCombo"], async (_, _) =>
             {
                 if (_pendingAssignmentRecommendation is not JsonElement currentRecommendation
-                    || !string.Equals(currentRecommendation.GetRawText(), assignmentRecommendation.GetRawText(), StringComparison.Ordinal))
+                    || !string.Equals(currentRecommendation.GetRawText(), assignmentRecommendation.GetRawText(), StringComparison.Ordinal)
+                    || !string.Equals(_pendingAssignmentRecommendationId, capturedRecommendationId, StringComparison.Ordinal))
                 {
                     HideTaggedDetailElement("recommendation:assignment");
                     SetLocalizedStatus("SuggestedComboExpired", isError: true);
@@ -2315,9 +2349,13 @@ public partial class MainWindow : Window
                     else if (property.Name == "resolve_ambiguous" && property.Value.ValueKind is JsonValueKind.True or JsonValueKind.False)
                         appliedParameters[property.Name] = property.Value.GetBoolean();
                 }
-                if (!await PersistAppliedRecommendationAsync("assignment", appliedParameters)) return;
-                ApplyAssignmentRecommendation(assignmentRecommendation);
-                _pendingAssignmentRecommendation = null;
+                var canonicalParameters = await PersistAppliedRecommendationAsync(
+                    "assignment",
+                    appliedParameters,
+                    capturedRecommendationId);
+                if (canonicalParameters is not JsonElement appliedRecommendation) return;
+                ApplyAssignmentRecommendation(appliedRecommendation);
+                ClearPendingAssignmentRecommendation();
                 SetLocalizedStatus("SuggestedComboApplied");
                 RefreshSectionViewIfSelected("cellTypes");
             }, primary: true);
@@ -2430,6 +2468,117 @@ public partial class MainWindow : Window
         ambiguous_min_gap = _assignmentValues["ambiguous_min_gap"],
     };
 
+    private UIElement CreateAssignmentRecommendationReview(
+        JsonElement recommendation,
+        JsonElement? metrics)
+    {
+        var content = new StackPanel();
+        content.Children.Add(CreateSubsectionTitle(_localization["SuggestedCombination"]));
+
+        if (metrics is JsonElement score
+            && score.TryGetProperty("unresolvedCells", out var unresolvedElement)
+            && score.TryGetProperty("unassignedCells", out var unassignedElement)
+            && score.TryGetProperty("ambiguousCells", out var ambiguousElement)
+            && score.TryGetProperty("sampledCells", out var sampledElement)
+            && unresolvedElement.TryGetInt32(out var unresolved)
+            && unassignedElement.TryGetInt32(out var unassigned)
+            && ambiguousElement.TryGetInt32(out var ambiguous)
+            && sampledElement.TryGetInt32(out var sampled))
+        {
+            content.Children.Add(CreateSupportingText(
+                string.Format(
+                    CultureInfo.CurrentCulture,
+                    _localization["AssignmentSuggestionScore"],
+                    unresolved,
+                    unassigned,
+                    ambiguous,
+                    sampled),
+                new Thickness(0, 6, 0, 10)));
+        }
+
+        var values = new Grid { Margin = new Thickness(0, 4, 0, 4) };
+        values.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        values.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(190) });
+        var rowIndex = 0;
+
+        void AddValue(string key, string label, string value, bool isFixed = false)
+        {
+            values.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            var labelText = new TextBlock
+            {
+                Text = isFixed ? $"{label} ({_localization["FixedValue"]})" : label,
+                Margin = new Thickness(0, 5, 16, 5),
+                Foreground = (Brush)FindResource("SecondaryTextBrush"),
+                TextWrapping = TextWrapping.Wrap,
+            };
+            var valueText = new TextBlock
+            {
+                Text = value,
+                Margin = new Thickness(0, 5, 0, 5),
+                FontFamily = new FontFamily("Cascadia Mono, Consolas"),
+                FontWeight = FontWeights.SemiBold,
+                TextAlignment = TextAlignment.Right,
+            };
+            AutomationProperties.SetAutomationId(valueText, $"AssignmentSuggestion_{key}");
+            Grid.SetRow(labelText, rowIndex);
+            Grid.SetRow(valueText, rowIndex);
+            Grid.SetColumn(valueText, 1);
+            values.Children.Add(labelText);
+            values.Children.Add(valueText);
+            rowIndex++;
+        }
+
+        foreach (var parameter in ParameterCatalog.Assignment)
+        {
+            if (!recommendation.TryGetProperty(parameter.Key, out var value)
+                || value.ValueKind != JsonValueKind.Number)
+            {
+                continue;
+            }
+            var label = _localization.EffectiveLanguage == InterfaceLanguage.SimplifiedChinese
+                ? parameter.ChineseName
+                : parameter.EnglishName;
+            AddValue(
+                parameter.Key,
+                label,
+                value.GetRawText(),
+                IsAssignmentParameterFixed(parameter.Key));
+        }
+        if (recommendation.TryGetProperty("thresh_mode", out var threshold)
+            && threshold.ValueKind == JsonValueKind.String)
+        {
+            var thresholdValue = threshold.GetString() switch
+            {
+                "global_otsu" => "Global Otsu",
+                "local" => "Local",
+                "yen" => "Yen",
+                "triangle" => "Triangle",
+                var raw => raw ?? string.Empty,
+            };
+            AddValue("thresh_mode", _localization["ThresholdMode"], thresholdValue);
+        }
+        if (recommendation.TryGetProperty("resolve_ambiguous", out var resolve)
+            && resolve.ValueKind is JsonValueKind.True or JsonValueKind.False)
+        {
+            AddValue(
+                "resolve_ambiguous",
+                _localization["ResolveAmbiguousCells"],
+                _localization[resolve.GetBoolean() ? "Enabled" : "Disabled"]);
+        }
+        content.Children.Add(values);
+        AutomationProperties.SetAutomationId(content, "AssignmentSuggestedComboReview");
+        return new Border
+        {
+            Background = new SolidColorBrush(Color.FromRgb(247, 249, 250)),
+            BorderBrush = (Brush)FindResource("PanelBorderBrush"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(7),
+            Padding = new Thickness(14, 12, 14, 12),
+            Margin = new Thickness(0, 0, 0, 10),
+            Child = content,
+        };
+    }
+
     private void ApplyAssignmentRecommendation(JsonElement recommended)
     {
         if (recommended.ValueKind != JsonValueKind.Object) return;
@@ -2447,27 +2596,35 @@ public partial class MainWindow : Window
         InvalidateAfter("cellTypes");
     }
 
-    private async Task<bool> PersistAppliedRecommendationAsync(
+    private async Task<JsonElement?> PersistAppliedRecommendationAsync(
         string kind,
-        IReadOnlyDictionary<string, object?> parameters)
+        IReadOnlyDictionary<string, object?> parameters,
+        string? recommendationId = null)
     {
         if (_isBusy)
         {
             SetLocalizedStatus("AnalysisAlreadyRunning", isError: true);
-            return false;
+            return null;
         }
 
         SetInteractionBusy(true);
         UpdateHeader();
         try
         {
-            await _engine.SendAsync("apply_recommendation", new { kind, parameters });
-            return true;
+            var response = await _engine.SendAsync(
+                "apply_recommendation",
+                new { kind, parameters, recommendationId });
+            if (!response.TryGetProperty("parameters", out var canonicalParameters)
+                || canonicalParameters.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidDataException("The engine did not return canonical applied parameters.");
+            }
+            return canonicalParameters.Clone();
         }
         catch (Exception exception)
         {
             SetStatus(LocalizeEngineError(exception.Message), isError: true);
-            return false;
+            return null;
         }
         finally
         {
@@ -2478,7 +2635,7 @@ public partial class MainWindow : Window
 
     private void InvalidateCellTypeInputs()
     {
-        _pendingAssignmentRecommendation = null;
+        ClearPendingAssignmentRecommendation();
         InvalidateAfter("cellTypes");
     }
 
@@ -3015,7 +3172,7 @@ public partial class MainWindow : Window
         if (index <= _sections.ToList().FindIndex(section => section.Key == "cellTypes"))
         {
             RemoveWorkflowPreviews("cellTypes");
-            _pendingAssignmentRecommendation = null;
+            ClearPendingAssignmentRecommendation();
             HideTaggedDetailElement("recommendation:assignment");
             _resolvedCellTypes.Clear();
         }

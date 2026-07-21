@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import pandas as pd
 from skimage import morphology
 
 
@@ -15,7 +18,11 @@ BACKEND_DIR = WINDOWS_DIR / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from native_engine import ASSIGNMENT_OPTIMIZER_SEARCH_SPECS  # noqa: E402
+from native_engine import (  # noqa: E402
+    ASSIGNMENT_OPTIMIZER_SEARCH_SPECS,
+    NativeEngine,
+    _normalize_assignment_parameters,
+)
 from src.spatialscope_analysis.celltype_assignment import (  # noqa: E402
     CelltypeAssignmentParams,
     MAX_ASSIGNMENT_SMOOTHING_RADIUS_PX,
@@ -27,9 +34,26 @@ from src.spatialscope_analysis.celltype_assignment import (  # noqa: E402
     _preprocess_assignment_marker,
     _truncated_box_blur,
 )
+from src.spatialscope_analysis.models import PipelineConfig  # noqa: E402
 
 
 class AssignmentParameterParityTests(unittest.TestCase):
+    @staticmethod
+    def _complete_parameters() -> dict[str, object]:
+        return {
+            "r_voronoi_um": 3.0,
+            "r_buffer_um": 2.0,
+            "r_vote_um": 3.0,
+            "tophat_r_um": 1.0,
+            "gauss_sigma_um": 0.5,
+            "thresh_mode": "global_otsu",
+            "min_pos_object_size_px": 9,
+            "min_pos_pix": 5,
+            "resolve_ambiguous": True,
+            "ambiguous_min_probability": 0.60,
+            "ambiguous_min_gap": 0.10,
+        }
+
     @staticmethod
     def _reference_box_blur(image: np.ndarray, radius: int) -> np.ndarray:
         values = np.asarray(image, dtype=np.float64)
@@ -101,6 +125,91 @@ class AssignmentParameterParityTests(unittest.TestCase):
         self.assertIn('"local" => 1', source)
         self.assertIn('Content = "Triangle", Tag = "triangle"', source)
 
+    def test_wpf_reviews_and_applies_canonical_assignment_recommendation(self) -> None:
+        source = (
+            WINDOWS_DIR / "native" / "src" / "SpatialScope.App" / "MainWindow.xaml.cs"
+        ).read_text(encoding="utf-8")
+        self.assertIn('AutomationProperties.SetAutomationId(content, "AssignmentSuggestedComboReview")', source)
+        self.assertIn('_localization["AssignmentSuggestionScore"]', source)
+        self.assertIn('capturedRecommendationId', source)
+        self.assertIn('ApplyAssignmentRecommendation(appliedRecommendation)', source)
+        self.assertIn('parameters = BuildAssignmentPayload()', source)
+        self.assertIn('value.GetRawText()', source)
+        self.assertIn('values[parameter.Key].ToString("R", CultureInfo.CurrentCulture)', source)
+
+        optimizer_handler = source.index(
+            'var optimize = CreateButton(_localization["RunAssignmentOptimizer"]'
+        )
+        clear_previous = source.index(
+            'ClearPendingOptimizerResult("assignment");',
+            optimizer_handler,
+        )
+        start_request = source.index(
+            'RunWorkflowAsync("cellTypes", "celltype_optimizer"',
+            optimizer_handler,
+        )
+        self.assertLess(clear_previous, start_request)
+
+    def test_assignment_optimizer_invalidates_stale_recommendation_before_artifact_replacement(self) -> None:
+        source = (BACKEND_DIR / "native_engine.py").read_text(encoding="utf-8")
+        optimizer = source.index("def celltype_optimizer(")
+        invalidate = source.index(
+            'self.recommendation_state["assignment"] = False',
+            optimizer,
+        )
+        execute = source.index(
+            "run_celltype_assignment_parameter_optimizer(",
+            optimizer,
+        )
+        publish = source.index(
+            'self.recommendation_state["assignment"] = bool(recommended)',
+            execute,
+        )
+        self.assertLess(invalidate, execute)
+        self.assertLess(execute, publish)
+
+        with tempfile.TemporaryDirectory(prefix="spatialscope-assignment-rerun-") as temporary:
+            root = Path(temporary)
+            engine = NativeEngine()
+            engine.config = PipelineConfig(
+                folder=root,
+                save_dir=root,
+                pixel_size_um=(1.0, 1.0),
+            )
+            engine.nuclei_result = {"labels": np.zeros((2, 2), dtype=np.int32)}
+            engine.data_result = {"df_pixels": pd.DataFrame(), "shapes": {}}
+            engine.celltype_config = [{
+                "name": "T cell",
+                "color_hex": "#1f77b4",
+                "mode": "simple",
+                "all_pos": ["CD3"],
+                "all_neg": [],
+                "any_pos_groups": [],
+            }]
+            engine.recommendation_state["assignment"] = True
+            engine._persist_workflow_state()
+
+            with patch("native_engine._progress"), patch(
+                "native_engine.run_celltype_assignment_parameter_optimizer",
+                side_effect=RuntimeError("simulated interrupted rerun"),
+            ), self.assertRaisesRegex(RuntimeError, "interrupted rerun"):
+                engine.celltype_optimizer(
+                    "test-interrupted-assignment-rerun",
+                    {
+                        "cellTypes": engine.celltype_config,
+                        "parameters": self._complete_parameters(),
+                        "maxEvaluations": 1,
+                        "parallelWorkers": 1,
+                        "parallelBackend": "threading",
+                    },
+                )
+
+            self.assertFalse(engine.recommendation_state["assignment"])
+            saved_state = json.loads(
+                (root / "00_config" / "windows_session_state.json").read_text(encoding="utf-8")
+            )
+            self.assertFalse(saved_state["recommendations"]["assignment"])
+
     def test_optimizer_defaults_match_macos_domains(self) -> None:
         expected = {
             "r_voronoi_um": (0.0, 300.0, 1.0),
@@ -131,6 +240,23 @@ class AssignmentParameterParityTests(unittest.TestCase):
             ),
             (0.0, 1.0),
         )
+
+    def test_assignment_parameter_normalization_requires_exact_safe_schema(self) -> None:
+        expected = self._complete_parameters()
+        self.assertEqual(_normalize_assignment_parameters(expected), expected)
+
+        invalid_cases = (
+            ({key: value for key, value in expected.items() if key != "r_vote_um"}, "Missing assignment parameters"),
+            ({**expected, "unexpected": 1}, "Unknown assignment parameters"),
+            ({**expected, "resolve_ambiguous": "false"}, "must be a Boolean"),
+            ({**expected, "thresh_mode": "automatic"}, "must be one of"),
+            ({**expected, "min_pos_pix": 2.5}, "must be an integer"),
+            ({**expected, "r_buffer_um": float("nan")}, "must be finite"),
+            ({**expected, "ambiguous_min_probability": 1.01}, "must be between"),
+        )
+        for payload, message in invalid_cases:
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                _normalize_assignment_parameters(payload)
 
     def test_local_mode_is_preserved_and_matches_macos_otsu_behavior(self) -> None:
         params = CelltypeAssignmentParams(thresh_mode="local")

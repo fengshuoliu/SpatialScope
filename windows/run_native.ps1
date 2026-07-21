@@ -82,6 +82,8 @@ if ($Command -eq "test") {
     Assert-Success "native Python compile check"
     & $VenvPython -m unittest discover -s $TestsRoot -p "test_compute_runtime.py" -v
     Assert-Success "CPU and OpenCL compute parity tests"
+    & $VenvPython -m unittest discover -s $TestsRoot -p "test_celltype_optimizer_recommendation.py" -v
+    Assert-Success "cell-type optimizer recommendation objective tests"
     & $VenvPython (Join-Path $BackendRoot "native_engine.py") --smoke-test
     Assert-Success "source Matplotlib renderer smoke test"
     dotnet run --project $UpdaterTestProject --configuration Release

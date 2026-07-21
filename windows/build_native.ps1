@@ -96,6 +96,8 @@ try {
     Assert-Success "exact nuclei optimizer grouping tests"
     & $PythonExe -m unittest discover -s $TestsRoot -p "test_optimizer_fixed_parameters.py" -v
     Assert-Success "optimizer fixed-parameter contract tests"
+    & $PythonExe -m unittest discover -s $TestsRoot -p "test_celltype_optimizer_recommendation.py" -v
+    Assert-Success "cell-type optimizer recommendation objective tests"
     & $PythonExe -m unittest discover -s $TestsRoot -p "test_assignment_parameter_parity.py" -v
     Assert-Success "assignment parameter parity tests"
     & $PythonExe -m unittest discover -s $TestsRoot -p "test_celltype_vectorized_rules.py" -v
