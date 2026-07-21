@@ -23,11 +23,16 @@ Unicode true
 !define INSTALL_MARKER ".spatialscope-install"
 !define SMOKE_MARKER ".spatialscope-smoke"
 !define INSTANCE_MUTEX "Local\SpatialScope.Windows.Application"
+!define QA_INSTANCE_MUTEX_PREFIX "Local\SpatialScope.Windows.Application.QA."
+!define QA_INSTANCE_MUTEX_PREFIX_LENGTH 42
+!define QA_INSTANCE_MUTEX_LENGTH 74
+!define QA_SMOKE_ARGUMENT "--qa-smoke"
 
 Var SmokeMode
 Var UpdateMode
 Var UpdatePid
 Var InstanceMutexHandle
+Var InstanceMutexName
 
 Name "${APP_NAME}"
 OutFile "${OUTPUT_DIR}\SpatialScope-Windows-x64-Setup.exe"
@@ -69,12 +74,67 @@ Function .onInit
   StrCpy $UpdateMode "0"
   StrCpy $UpdatePid ""
   StrCpy $InstanceMutexHandle "0"
+  StrCpy $InstanceMutexName "${INSTANCE_MUTEX}"
   ${GetParameters} $R0
   ClearErrors
   ${GetOptions} $R0 "/SMOKETEST" $R1
   ${IfNot} ${Errors}
     StrCpy $SmokeMode "1"
+    ReadEnvStr $R2 "SPATIALSCOPE_QA_INSTANCE_MUTEX"
+    ${If} $R2 != ""
+      StrLen $R3 $R2
+      ${If} $R3 == ${QA_INSTANCE_MUTEX_LENGTH}
+        StrCpy $R3 $R2 ${QA_INSTANCE_MUTEX_PREFIX_LENGTH}
+        ${If} $R3 == "${QA_INSTANCE_MUTEX_PREFIX}"
+          StrCpy $R4 ${QA_INSTANCE_MUTEX_PREFIX_LENGTH}
+          Goto qa_mutex_validate_loop
+        ${EndIf}
+      ${EndIf}
+    ${EndIf}
   ${EndIf}
+  Goto qa_mutex_validation_done
+
+  qa_mutex_validate_loop:
+    IntCmp $R4 ${QA_INSTANCE_MUTEX_LENGTH} qa_mutex_valid qa_mutex_validate_character qa_mutex_invalid
+
+  qa_mutex_validate_character:
+    StrCpy $R5 $R2 1 $R4
+    StrCmp $R5 "0" qa_mutex_character_valid
+    StrCmp $R5 "1" qa_mutex_character_valid
+    StrCmp $R5 "2" qa_mutex_character_valid
+    StrCmp $R5 "3" qa_mutex_character_valid
+    StrCmp $R5 "4" qa_mutex_character_valid
+    StrCmp $R5 "5" qa_mutex_character_valid
+    StrCmp $R5 "6" qa_mutex_character_valid
+    StrCmp $R5 "7" qa_mutex_character_valid
+    StrCmp $R5 "8" qa_mutex_character_valid
+    StrCmp $R5 "9" qa_mutex_character_valid
+    StrCmp $R5 "a" qa_mutex_character_valid
+    StrCmp $R5 "b" qa_mutex_character_valid
+    StrCmp $R5 "c" qa_mutex_character_valid
+    StrCmp $R5 "d" qa_mutex_character_valid
+    StrCmp $R5 "e" qa_mutex_character_valid
+    StrCmp $R5 "f" qa_mutex_character_valid
+    StrCmp $R5 "A" qa_mutex_character_valid
+    StrCmp $R5 "B" qa_mutex_character_valid
+    StrCmp $R5 "C" qa_mutex_character_valid
+    StrCmp $R5 "D" qa_mutex_character_valid
+    StrCmp $R5 "E" qa_mutex_character_valid
+    StrCmp $R5 "F" qa_mutex_character_valid
+    Goto qa_mutex_invalid
+
+  qa_mutex_character_valid:
+    IntOp $R4 $R4 + 1
+    Goto qa_mutex_validate_loop
+
+  qa_mutex_valid:
+    StrCpy $InstanceMutexName $R2
+    Goto qa_mutex_validation_done
+
+  qa_mutex_invalid:
+    StrCpy $InstanceMutexName "${INSTANCE_MUTEX}"
+
+  qa_mutex_validation_done:
 
   ; The verified installer is started before SpatialScope closes. Wait for
   ; that exact process to finish so the executable and analysis engine are
@@ -86,7 +146,7 @@ Function .onInit
     ; Atomically open the app's named mutex or create it if the old process
     ; already exited. Keeping this handle alive prevents a new app launch from
     ; entering the installation while files are being replaced.
-    System::Call 'kernel32::CreateMutexW(p 0, i 0, w "${INSTANCE_MUTEX}") p.R4'
+    System::Call 'kernel32::CreateMutexW(p 0, i 0, w "$InstanceMutexName") p.R4'
     StrCpy $InstanceMutexHandle $R4
     ${If} $InstanceMutexHandle == 0
       SetErrorLevel 6
@@ -188,7 +248,11 @@ Section "SpatialScope" SEC_MAIN
       System::Call 'kernel32::CloseHandle(p $InstanceMutexHandle)'
       StrCpy $InstanceMutexHandle "0"
     ${EndIf}
-    Exec '"$INSTDIR\SpatialScope.exe"'
+    ${If} $SmokeMode == "1"
+      Exec '"$INSTDIR\SpatialScope.exe" ${QA_SMOKE_ARGUMENT}'
+    ${Else}
+      Exec '"$INSTDIR\SpatialScope.exe"'
+    ${EndIf}
   ${EndIf}
 SectionEnd
 

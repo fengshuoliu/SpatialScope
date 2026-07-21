@@ -118,7 +118,7 @@ from src.spatialscope_analysis.visualization import (  # noqa: E402
 
 
 PROTOCOL_VERSION = 1
-ENGINE_VERSION = "1.2.5"
+ENGINE_VERSION = "1.2.6"
 PROTOCOL_STDOUT = sys.stdout
 
 REGION_CONTOUR_DOWNSAMPLES = (1, 2, 4, 8)

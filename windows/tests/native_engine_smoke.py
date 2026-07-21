@@ -500,6 +500,26 @@ def run_smoke(engine_command: Sequence[str], input_folder: Path, output_folder: 
         )
         if second_filtered_preview["previewPath"] == filtered_preview["previewPath"]:
             raise AssertionError("Distinct Region preview keys reused the same cache path.")
+        manual_editor_payload = {
+            **filtered_preview_payload,
+            "selectedCellTypes": [resolved_types[0]],
+            "previewKey": "manual_editor",
+            "boundaryCellTypeMode": "source",
+        }
+        first_manual_editor_preview = engine.request("region_preview", manual_editor_payload)
+        manual_editor_path = Path(first_manual_editor_preview["previewPath"])
+        first_manual_editor_bytes = manual_editor_path.read_bytes()
+        second_manual_editor_preview = engine.request(
+            "region_preview",
+            {**manual_editor_payload, "selectedCellTypes": [resolved_types[1]]},
+        )
+        second_manual_editor_path = Path(second_manual_editor_preview["previewPath"])
+        if second_manual_editor_path != manual_editor_path:
+            raise AssertionError("Manual editor selections did not reuse their stable preview path.")
+        if second_manual_editor_path.read_bytes() == first_manual_editor_bytes:
+            raise AssertionError(
+                "Manual editor preview pixels did not change after selecting a different displayed cell type."
+            )
         if json.loads(workflow_state_path.read_text(encoding="utf-8")) != state_before_region_preview:
             raise AssertionError("Read-only Region preview changed persisted workflow state.")
 

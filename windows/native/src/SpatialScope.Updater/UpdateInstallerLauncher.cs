@@ -6,6 +6,51 @@ namespace SpatialScope.Windows.Updates;
 public static class UpdateInstallerLauncher
 {
     public const string InstanceMutexName = @"Local\SpatialScope.Windows.Application";
+    public const string QaInstanceMutexEnvironmentVariable = "SPATIALSCOPE_QA_INSTANCE_MUTEX";
+    public const string QaSmokeLaunchArgument = "--qa-smoke";
+    public const string QaSmokeMarkerFileName = ".spatialscope-smoke";
+    private const string QaInstanceMutexPrefix = @"Local\SpatialScope.Windows.Application.QA.";
+    private const int QaInstanceMutexTokenLength = 32;
+
+    public static string ResolveInstanceMutexName(
+        IEnumerable<string> launchArguments,
+        string applicationDirectory)
+    {
+        ArgumentNullException.ThrowIfNull(launchArguments);
+        ArgumentException.ThrowIfNullOrWhiteSpace(applicationDirectory);
+
+        if (!launchArguments.Contains(QaSmokeLaunchArgument, StringComparer.Ordinal))
+            return InstanceMutexName;
+
+        var requested = Environment.GetEnvironmentVariable(QaInstanceMutexEnvironmentVariable);
+        if (!IsValidQaInstanceMutexName(requested))
+            return InstanceMutexName;
+
+        try
+        {
+            var markerPath = Path.Combine(
+                Path.GetFullPath(applicationDirectory),
+                QaSmokeMarkerFileName);
+            return File.Exists(markerPath) ? requested! : InstanceMutexName;
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or NotSupportedException)
+        {
+            return InstanceMutexName;
+        }
+    }
+
+    public static bool IsValidQaInstanceMutexName(string? requested)
+    {
+        if (requested is null
+            || requested.Length != QaInstanceMutexPrefix.Length + QaInstanceMutexTokenLength
+            || !requested.StartsWith(QaInstanceMutexPrefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return requested.AsSpan(QaInstanceMutexPrefix.Length).IndexOfAnyExcept(
+            "0123456789abcdefABCDEF") < 0;
+    }
 
     public static Process Start(
         PreparedWindowsUpdate update,

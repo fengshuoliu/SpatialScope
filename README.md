@@ -30,7 +30,7 @@ The complete testing workflow, dataset contents, integrity checks, and interpret
 | Platform | Status | Repository location |
 | --- | --- | --- |
 | macOS | Version 1.2.1 | Current Xcode project |
-| Windows x64 | Version 1.2.5 | [`windows/`](windows/) |
+| Windows x64 | Version 1.2.6 | [`windows/`](windows/) |
 
 Both platforms use the same `SpatialScope` product identity, analysis definitions, and output contracts. Platform versions and release tags are tracked independently.
 

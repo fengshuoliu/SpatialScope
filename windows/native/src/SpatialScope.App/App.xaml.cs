@@ -15,7 +15,7 @@ public partial class App : Application
         {
             _instanceMutex = new Mutex(
                 initiallyOwned: true,
-                UpdateInstallerLauncher.InstanceMutexName,
+                UpdateInstallerLauncher.ResolveInstanceMutexName(e.Args, AppContext.BaseDirectory),
                 out var createdNew);
             if (!createdNew)
             {

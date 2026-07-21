@@ -3288,16 +3288,7 @@ public partial class MainWindow : Window
     }
 
     private static BitmapImage LoadBoundedBitmap(string path, int decodeWidth)
-    {
-        var bitmap = new BitmapImage();
-        bitmap.BeginInit();
-        bitmap.CacheOption = BitmapCacheOption.OnLoad;
-        bitmap.DecodePixelWidth = decodeWidth;
-        bitmap.UriSource = new Uri(path, UriKind.Absolute);
-        bitmap.EndInit();
-        bitmap.Freeze();
-        return bitmap;
-    }
+        => PreviewBitmapLoader.LoadFresh(path, decodeWidth);
 
     private void OpenOutputButton_Click(object sender, RoutedEventArgs e) => OpenPath(_outputFolder);
 
