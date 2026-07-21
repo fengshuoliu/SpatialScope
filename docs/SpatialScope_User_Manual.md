@@ -13,6 +13,7 @@
   - [2.3 Create channel text images outside SpatialScope](#23-create-channel-text-images-outside-spatialscope)
 - [3. Launching the app and understanding the interface](#3-launching-the-app-and-understanding-the-interface)
 - [4. Quick-start workflow](#4-quick-start-workflow)
+  - [4.1 Test with the demonstration dataset](#41-test-with-the-demonstration-dataset)
 - [5. Step 1 — Inputs & Calibration](#5-step-1--inputs--calibration)
 - [6. Step 2 — Composite Preview](#6-step-2--composite-preview)
 - [7. Step 3 — Nuclei Segmentation](#7-step-3--nuclei-segmentation)
@@ -222,6 +223,12 @@ The sidebar status is a workflow indicator, not a scientific validation guarante
 ---
 
 ## 4. Quick-start workflow
+
+### 4.1 Test with the demonstration dataset
+
+The [SpatialScope demonstration dataset](https://github.com/fengshuoliu/SpatialScope/releases/download/demo-dataset-v1.0/SpatialScope-Demo-Dataset-v1.0.zip) contains the 16 aligned CSV marker matrices shown in this manual and a complete example output folder. The same archive can be used with the macOS and Windows applications.
+
+After extracting the archive, select `test_input_files` as the input folder and create a separate, empty folder for the new test outputs. Do not use the included `test_output_files` folder as the active output destination. For the reference calibration, enter `1000 um` and `1000 px` for both axes and select `Ir191_nuclei` as the nucleus channel. See the repository's [`demo_dataset` guide](../demo_dataset/README.md) for integrity checks, detailed instructions, and interpretation notes.
 
 Use this checklist for a standard full run:
 
