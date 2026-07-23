@@ -104,6 +104,8 @@ Multichannel image
 9. Give each exported file a descriptive marker name ending in `.csv`, such as `CD8A.csv`, `CD45.csv`, or `Ir191_nuclei.csv`. If the software produces a `.txt` extension, rename it to `.csv` without changing the tab-delimited contents. SpatialScope accepts tab-delimited values but scans only files whose names end in `.csv`.
 10. Place all channel CSV files directly inside one input folder. Do not place them in per-channel subfolders.
 
+> **Recommended preprocessing before export: In ImageJ/Fiji, inspect each channel and, when scientifically appropriate, remove or correct the background and adjust the underlying pixel intensity and contrast. Complete these preprocessing steps before choosing File → Save As → Text Image, because SpatialScope analyzes the exported numeric pixel values.**
+
 > **Brightness and contrast:** In ImageJ, changing the Brightness/Contrast display range does not necessarily change the underlying pixel values. Text Image export writes the numeric pixel matrix, not simply the appearance on screen. If a brightness or contrast change must affect the analysis, use an appropriate operation that modifies the pixel data and verify the resulting values before export. See the [ImageJ Brightness and Contrast documentation](https://imagej.net/ij/docs/menus/image.html#adjust).
 
 After all channels have been exported and checked, continue to [Section 5, Step 1 — Inputs & Calibration](#5-step-1--inputs--calibration).
